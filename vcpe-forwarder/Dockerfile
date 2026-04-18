@@ -5,7 +5,7 @@ RUN apk add --no-cache \
     iproute2 \
     iptables \
     nftables \
-    wireguard \
+    wireguard-tools \
     busybox-extras \
     curl \
     ca-certificates

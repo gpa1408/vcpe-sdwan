@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<clixon-config xmlns="http://clicon.org/config">
+  <CLICON_CONFIGFILE>/etc/clixon/clixon-config.xml</CLICON_CONFIGFILE>
+
+  <CLICON_YANG_DIR>/etc/clixon/yang</CLICON_YANG_DIR>
+  <CLICON_YANG_MAIN_FILE>vcpe-agent.yang</CLICON_YANG_MAIN_FILE>
+
+  <CLICON_XMLDB_DIR>/var/lib/clixon</CLICON_XMLDB_DIR>
+  <CLICON_XMLDB_FORMAT>xml</CLICON_XMLDB_FORMAT>
+  <CLICON_XMLDB_PRETTY>true</CLICON_XMLDB_PRETTY>
+
+  <CLICON_SOCK>/run/clixon/clixon.sock</CLICON_SOCK>
+
+  <CLICON_BACKEND_DIR>/usr/local/lib/clixon/backend</CLICON_BACKEND_DIR>
+  <CLICON_NETCONF_DIR>/usr/local/lib/clixon/netconf</CLICON_NETCONF_DIR>
+  <CLICON_RESTCONF_DIR>/usr/local/lib/clixon/restconf</CLICON_RESTCONF_DIR>
+  <CLICON_CLI_DIR>/usr/local/lib/clixon/cli</CLICON_CLI_DIR>
+
+  <restconf xmlns="http://clicon.org/restconf">
+    <enable>true</enable>
+    <auth-type>none</auth-type>
+    <socket>
+      <description>HTTP listen</description>
+      <namespace>default</namespace>
+      <address>0.0.0.0</address>
+      <port>8383</port>
+      <ssl>false</ssl>
+    </socket>
+  </restconf>
+</clixon-config>

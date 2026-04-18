@@ -1,0 +1,5 @@
+<config>
+  <agent xmlns="urn:vcpe:agent">
+    <enabled>true</enabled>
+  </agent>
+</config>
