@@ -8,7 +8,7 @@ RESTCONF_BIN="/usr/local/sbin/clixon_restconf"
 mkdir -p /var/lib/clixon
 mkdir -p /run/clixon
 
-# Si no existe startup_db persistente, copiamos el inicial
+# Copia startup_db inicial solo la primera vez
 if [ ! -f /var/lib/clixon/startup_db ] && [ -f /etc/clixon/startup_db ]; then
   cp /etc/clixon/startup_db /var/lib/clixon/startup_db
 fi
@@ -17,21 +17,29 @@ cleanup() {
   echo "[entrypoint] stopping services..."
   kill "${AGENT_PID:-}" 2>/dev/null || true
   kill "${RESTCONF_PID:-}" 2>/dev/null || true
-  kill "${BACKEND_PID:-}" 2>/dev/null || true
+
+  if [ -f /run/clixon/clixon_backend.pid ]; then
+    kill "$(cat /run/clixon/clixon_backend.pid)" 2>/dev/null || true
+  fi
+
   wait || true
 }
 
 trap cleanup INT TERM
 
 echo "[entrypoint] starting clixon_backend..."
-"$BACKEND_BIN" -s running -f "$CFG" &
-BACKEND_PID=$!
+"$BACKEND_BIN" -s running -f "$CFG"
 
-sleep 2
-if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
-  echo "[entrypoint] clixon_backend failed"
-  exit 1
-fi
+echo "[entrypoint] waiting for clixon backend socket..."
+i=0
+while [ ! -S /run/clixon/clixon.sock ] || [ ! -f /run/clixon/clixon_backend.pid ]; do
+  i=$((i+1))
+  if [ "$i" -ge 15 ]; then
+    echo "[entrypoint] clixon_backend failed to create socket/pidfile"
+    exit 1
+  fi
+  sleep 1
+done
 
 echo "[entrypoint] starting clixon_restconf..."
 "$RESTCONF_BIN" -f "$CFG" &
@@ -51,8 +59,15 @@ AGENT_PID=$!
 EXIT_CODE=0
 
 while true; do
-  if ! kill -0 "$BACKEND_PID" 2>/dev/null; then
-    echo "[entrypoint] clixon_backend exited"
+  if [ -f /run/clixon/clixon_backend.pid ]; then
+    BACKEND_REAL_PID="$(cat /run/clixon/clixon_backend.pid)"
+    if ! kill -0 "$BACKEND_REAL_PID" 2>/dev/null; then
+      echo "[entrypoint] clixon_backend exited"
+      EXIT_CODE=1
+      break
+    fi
+  else
+    echo "[entrypoint] clixon_backend pidfile missing"
     EXIT_CODE=1
     break
   fi
