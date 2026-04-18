@@ -2,6 +2,10 @@
 <clixon-config xmlns="http://clicon.org/config">
   <CLICON_CONFIGFILE>/etc/clixon/clixon-config.xml</CLICON_CONFIGFILE>
 
+  <!-- YANG internos de Clixon -->
+  <CLICON_YANG_DIR>/usr/local/share/clixon</CLICON_YANG_DIR>
+
+  <!-- Tus YANG propios -->
   <CLICON_YANG_DIR>/etc/clixon/yang</CLICON_YANG_DIR>
   <CLICON_YANG_MAIN_FILE>vcpe-agent.yang</CLICON_YANG_MAIN_FILE>
 
