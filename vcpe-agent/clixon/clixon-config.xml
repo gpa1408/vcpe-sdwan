@@ -2,11 +2,10 @@
 <clixon-config xmlns="http://clicon.org/config">
   <CLICON_CONFIGFILE>/etc/clixon/clixon-config.xml</CLICON_CONFIGFILE>
 
-  <!-- Search path -->
+  <CLICON_FEATURE>clixon-restconf:allow-auth-none</CLICON_FEATURE>
+
   <CLICON_YANG_DIR>/usr/local/share/clixon</CLICON_YANG_DIR>
   <CLICON_YANG_DIR>/etc/clixon/yang</CLICON_YANG_DIR>
-
-  <!-- Load all top-level YANGs from here -->
   <CLICON_YANG_MAIN_DIR>/etc/clixon/yang</CLICON_YANG_MAIN_DIR>
 
   <CLICON_XMLDB_DIR>/var/lib/clixon</CLICON_XMLDB_DIR>
@@ -20,7 +19,7 @@
   <CLICON_RESTCONF_DIR>/usr/local/lib/clixon/restconf</CLICON_RESTCONF_DIR>
   <CLICON_CLI_DIR>/usr/local/lib/clixon/cli</CLICON_CLI_DIR>
 
-  <restconf xmlns="http://clicon.org/restconf">
+  <restconf>
     <enable>true</enable>
     <auth-type>none</auth-type>
     <socket>
