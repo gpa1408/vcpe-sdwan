@@ -22,6 +22,9 @@
   <CLICON_RESTCONF_DIR>/usr/local/lib/clixon/restconf</CLICON_RESTCONF_DIR>
   <CLICON_CLI_DIR>/usr/local/lib/clixon/cli</CLICON_CLI_DIR>
 
+  <CLICON_RESTCONF_PRIVILEGES>none</CLICON_RESTCONF_PRIVILEGES>
+  <CLICON_ANONYMOUS_USER>root</CLICON_ANONYMOUS_USER>
+
   <restconf>
     <enable>true</enable>
     <auth-type>none</auth-type>
