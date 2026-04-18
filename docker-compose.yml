@@ -1,0 +1,165 @@
+
+services:
+  # vCPE Forwarder (dataplane programmer)
+  vcpe-forwarder:
+    build:
+      context: ./vcpe-forwarder
+    container_name: vcpe-forwarder
+    restart: unless-stopped
+
+    cap_add:
+      - NET_ADMIN
+      - NET_RAW
+
+    devices:
+      - /dev/net/tun:/dev/net/tun
+
+    environment:
+      - API_BIND=0.0.0.0
+      - API_PORT=9090
+      - STATE_DIR=/state
+
+
+    volumes:
+      - vcpe_forwarder_state:/state
+
+
+    networks:
+      - mgmt
+
+
+  # vCPE Agent (control-plane logic)
+  # External controller calls the agent (announce, keepalive/)
+  vcpe-agent:
+    build:
+      context: ./vcpe-agent
+    container_name: vcpe-agent
+    restart: unless-stopped  #restart docker if crashed when starts
+
+    environment:
+      - API_BIND=0.0.0.0
+      - API_PORT=8080
+      - FORWARDER_URL=http://vcpe-forwarder:9090
+
+      # If agent also calls SBI/Clixon internally (local service)
+      - SBI_URL=http://127.0.0.1:8383 
+
+      # if agent calls monitoring
+      - MONITORING_URL=http://vcpe-monitoring:9100
+      #Pull dal influx db da parte dell'agent
+      - INFLUX_URL=http://influxdb:8086
+      - INFLUX_BUCKET=vcpe
+      - INFLUX_ORG=thesis
+      - INFLUX_TOKEN=${INFLUX_TOKEN}
+
+      # Controller URL for outbound calls (if you do both push+pull)
+      - CONTROLLER_URL=http://${CONTROLLER_IP}:8080
+
+    depends_on:
+      - vcpe-forwarder
+      - vcpe-monitoring
+      - influxdb
+
+    volumes:
+      - vcpe_sbi_state:/var/lib/clixon
+
+    # controller must reach the agent externally
+    ports:
+      - "8080:8080"
+      - "8383:8383"
+
+    networks:
+      - mgmt
+
+
+
+  # -------------------------
+  # Monitoring service
+  # Expose an external port so metrics can be queried externally.
+  # -------------------------
+  vcpe-monitoring:
+    build:
+      context: ./vcpe-monitoring
+    container_name: vcpe-monitoring
+    restart: unless-stopped
+
+    environment:
+      - API_BIND=0.0.0.0
+      - API_PORT=9100
+
+      # If pushing metrics to Influx internally:
+      - INFLUX_URL=http://influxdb:8086
+      - INFLUX_BUCKET=vcpe
+      - INFLUX_ORG=thesis
+      - INFLUX_TOKEN=${INFLUX_TOKEN}
+    # INT monitoring PURPOSES
+    cap_add:
+      - NET_RAW
+
+    depends_on:
+      - influxdb
+
+    # external queries to monitoring/metrics
+    ports:
+      - "9100:9100"
+
+    networks:
+      - mgmt
+
+
+  # -------------------------
+  # InfluxDB (time series DB)
+  # -------------------------
+  influxdb:
+    image: influxdb:2.7
+    container_name: influxdb
+    restart: unless-stopped
+
+    environment:
+      - DOCKER_INFLUXDB_INIT_MODE=setup
+      - DOCKER_INFLUXDB_INIT_USERNAME=admin
+      - DOCKER_INFLUXDB_INIT_PASSWORD=adminadmin
+      - DOCKER_INFLUXDB_INIT_ORG=thesis
+      - DOCKER_INFLUXDB_INIT_BUCKET=vcpe
+      - DOCKER_INFLUXDB_INIT_ADMIN_TOKEN=${INFLUX_TOKEN}
+
+    volumes:
+      - influxdb_data:/var/lib/influxdb2
+
+    ports:
+      - "8086:8086"
+
+    networks:
+      - mgmt
+
+
+  # -------------------------
+  # Grafana dashboard for visualize metrics in dashboard
+  # -------------------------
+  grafana:
+    image: grafana/grafana:11.2.0
+    container_name: grafana
+    restart: unless-stopped
+
+    depends_on:
+      - influxdb
+
+    ports:
+      - "3000:3000"
+
+    volumes:
+      - grafana_data:/var/lib/grafana
+
+    networks:
+      - mgmt
+
+
+networks:
+  mgmt:
+    driver: bridge
+
+volumes:
+  vcpe_forwarder_state:
+  vcpe_sbi_state:
+  influxdb_data:
+  grafana_data:
