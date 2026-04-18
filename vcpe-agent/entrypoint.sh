@@ -8,7 +8,6 @@ RESTCONF_BIN="/usr/local/sbin/clixon_restconf"
 mkdir -p /var/lib/clixon
 mkdir -p /run/clixon
 
-# Copia startup_db inicial solo la primera vez
 if [ ! -f /var/lib/clixon/startup_db ] && [ -f /etc/clixon/startup_db ]; then
   cp /etc/clixon/startup_db /var/lib/clixon/startup_db
 fi
@@ -42,15 +41,22 @@ while [ ! -S /run/clixon/clixon.sock ] || [ ! -f /run/clixon/clixon_backend.pid 
 done
 
 echo "[entrypoint] starting clixon_restconf..."
-"$RESTCONF_BIN" -f "$CFG" &
+"$RESTCONF_BIN" -r -l e -D 1 -f "$CFG" &
 RESTCONF_PID=$!
 
-sleep 2
-if ! kill -0 "$RESTCONF_PID" 2>/dev/null; then
-  echo "[entrypoint] clixon_restconf failed"
-  cleanup
-  exit 1
-fi
+i=0
+while true; do
+  if kill -0 "$RESTCONF_PID" 2>/dev/null; then
+    break
+  fi
+  i=$((i+1))
+  if [ "$i" -ge 15 ]; then
+    echo "[entrypoint] clixon_restconf failed"
+    cleanup
+    exit 1
+  fi
+  sleep 1
+done
 
 echo "[entrypoint] starting python agent..."
 python3 -m app.main &
