@@ -28,7 +28,7 @@ def run_cmd(cmd: list[str]) -> dict:
             cmd,
             capture_output=True,
             text=True,
-            check=True
+            check=True,
             timeout=5
         )
         return {
