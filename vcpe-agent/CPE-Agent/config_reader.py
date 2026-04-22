@@ -17,7 +17,6 @@ class ConfigReader:
 
     def get_intended_config(self):
 
-        
         response = requests.get(self.url, headers=self.headers, timeout=5)    # Send an HTTP GET request to the RESTCONF URL
         
         response.raise_for_status()                                           # Raise an exception if the HTTP status code is not successful.Ex: 404, 500, etc.
