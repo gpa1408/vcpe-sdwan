@@ -7,7 +7,7 @@ class ConfigReader:
 
     def __init__(self):
          
-        self.url = "http://127.0.0.1:8383/restconf/data/sdwan-cpe:sdwan"       # Fixed RESTCONF URL for the top-level "sdwan" container
+        self.url = "http://127.0.0.1:8383/restconf/data/sdwan-cpe:sdwan"       # Fixed RESTCONF URL for the top-level "sdwan" container in clixon datarore
 
         self.headers = {                                      
             "Accept": "application/yang-data+json"                             # HTTP header asking Clixon to return data in YANG JSON format
