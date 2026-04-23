@@ -7,6 +7,7 @@ from app.nat_api import router as nat_router
 from app.routes_api import router as routes_router
 from app.rules_api import router as rules_router
 from app.stats_api import router as stats_router
+from app.wireguard_api import router as wireguard_router
 
 app = FastAPI(title="vCPE Forwarder")
 
@@ -26,6 +27,7 @@ app.include_router(interfaces_router)
 app.include_router(stats_router)
 app.include_router(nat_router)
 app.include_router(bridge_router)
+app.include_router(wireguard_router)
 
 
 if __name__ == "__main__":

@@ -36,3 +36,23 @@ class BridgeCreateRequest(BaseModel):
 
 class BridgePortRequest(BaseModel):
     interface: str    
+
+
+class WireGuardInterfaceCreateRequest(BaseModel):
+    name: str
+    private_key: str
+    listen_port: int | None = None
+    address: str | None = None
+
+
+class WireGuardInterfaceUpdateRequest(BaseModel):
+    private_key: str | None = None
+    listen_port: int | None = None
+    address: str | None = None
+
+
+class WireGuardPeerRequest(BaseModel):
+    public_key: str
+    allowed_ips: list[str]
+    endpoint: str | None = None
+    persistent_keepalive: int | None = None
