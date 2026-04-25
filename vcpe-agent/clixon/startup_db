@@ -1,4 +1,35 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
-  <sdwan xmlns="urn:sdwan:cpe"/>
+  <sdwan xmlns="urn:sdwan:cpe">
+    <interfaces>
+      <underlay>
+        <wan-link>
+          <name>UPL1</name>
+          <interface-name>eth0</interface-name>
+          <role>broadband</role>
+          <admin-enabled>true</admin-enabled>
+          <address-mode>dhcp</address-mode>
+          <nat-enabled>true</nat-enabled>
+        </wan-link>
+      </underlay>
+    </interfaces>
+
+    <traffic>
+      <class>
+        <name>test</name>
+        <five-tuple>
+          <l4-protocol>any</l4-protocol>
+        </five-tuple>
+      </class>
+    </traffic>
+
+    <policy>
+      <steering>
+        <class>test</class>
+        <steering-mode>failover</steering-mode>
+        <failover-link-type>wan-link</failover-link-type>
+        <primary-wan-link>UPL1</primary-wan-link>
+      </steering>
+    </policy>
+  </sdwan>
 </config>
