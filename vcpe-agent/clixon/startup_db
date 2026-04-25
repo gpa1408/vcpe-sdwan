@@ -1,5 +1,4 @@
-<config>
-  <agent xmlns="urn:vcpe:agent">
-    <enabled>true</enabled>
-  </agent>
+<?xml version="1.0" encoding="UTF-8"?>
+<config xmlns="urn:ietf:params:xml:ns:netconf:base:1.0">
+  <sdwan xmlns="urn:sdwan:cpe"/>
 </config>
