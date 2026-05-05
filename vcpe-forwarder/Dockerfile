@@ -25,4 +25,4 @@ ENV STATE_DIR=/state
 
 
 # ---- Entry point ----
-CMD ["python", "-m", "app.main"]
+CMD ["uvicorn", "forwarder.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "9090"]
