@@ -135,9 +135,19 @@ def _ok(resource: str, name: str, result: Any | None = None, extra: dict[str, An
 def get_nat_state(request: Request):
     state = _compat_state(request)
 
+    entries = []
+    for wan_name, wan in state["wan_links"].items():
+        entries.append({
+            "name": wan_name,
+            "interface-name": wan.get("interface-name"),
+            "nat-policy-id": wan.get("nat_policy_id"),
+            "nat-type": "masquerade" if wan.get("nat_policy_id") else "none",
+        })
+
     return {
         "forwarder:nat-state": {
             "status": "available",
+            "wan-link": entries,
             "wan-links": state["wan_links"],
         }
     }
@@ -152,7 +162,7 @@ def get_nat_state(request: Request):
 @router.patch("/restconf/data/forwarder:wan-links/wan-link={name}")
 async def apply_wan_link_config(name: str, request: Request):
     payload = await request.json()
-    wan = payload.get("wan-link", {})
+    wan = payload.get("wan-link") or payload
 
     interface_name = wan.get("interface-name")
     if not interface_name:
@@ -223,7 +233,7 @@ async def apply_wan_link_config(name: str, request: Request):
 @router.patch("/restconf/data/forwarder:lan-links/lan-link={name}")
 async def apply_lan_link_config(name: str, request: Request):
     payload = await request.json()
-    lan = payload.get("lan-link", {})
+    lan = payload.get("lan-link") or payload
 
     interface_name = lan.get("name") or name
     admin_enabled = lan.get("admin-enabled", True)
@@ -285,7 +295,7 @@ async def apply_lan_link_config(name: str, request: Request):
 @router.patch("/restconf/data/forwarder:tunnels/tunnel={name}")
 async def apply_tunnel_config(name: str, request: Request):
     payload = await request.json()
-    tunnel = payload.get("tunnel", {})
+    tunnel = payload.get("tunnel") or payload
 
     store = _store(request)
     state = _compat_state(request)
@@ -360,7 +370,7 @@ async def apply_tunnel_config(name: str, request: Request):
 @router.patch("/restconf/data/forwarder:firewall/rule={rule_id}")
 async def apply_firewall_rule(rule_id: str, request: Request):
     payload = await request.json()
-    rule = payload.get("rule", {})
+    rule = payload.get("rule") or payload
 
     action = rule.get("action")
 
@@ -404,7 +414,7 @@ async def apply_firewall_rule(rule_id: str, request: Request):
 @router.patch("/restconf/data/forwarder:traffic-classes/classifier={traffic_class}")
 async def install_traffic_class(traffic_class: str, request: Request):
     payload = await request.json()
-    cls = payload.get("class", {})
+    cls = payload.get("class") or payload
 
     state = _compat_state(request)
 
@@ -433,7 +443,7 @@ async def install_traffic_class(traffic_class: str, request: Request):
 @router.patch("/restconf/data/forwarder:steering/active-path={traffic_class}")
 async def set_active_path(traffic_class: str, request: Request):
     payload = await request.json()
-    steering = payload.get("steering", {})
+    steering = payload.get("steering") or payload
 
     selected_path = steering.get("selected-path")
     if not selected_path:
@@ -504,7 +514,7 @@ async def set_active_path(traffic_class: str, request: Request):
 @router.patch("/restconf/data/forwarder:steering/load-balance={traffic_class}")
 async def set_weighted_ecmp(traffic_class: str, request: Request):
     payload = await request.json()
-    steering = payload.get("steering", {})
+    steering = payload.get("steering") or payload
 
     selected_paths = (
         steering.get("eligible-paths")

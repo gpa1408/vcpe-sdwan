@@ -176,11 +176,11 @@ module sdwan-cpe {
               "Default IPv4 gateway for static configuration";
           }
 
-          leaf nat-enabled {
-            type boolean;
-            default "true";
-            description
-              "Enable NAT for traffic exiting this WAN link";
+          leaf nat-type {
+            type string;
+            config false;
+            description 
+              "Detected NAT type of this WAN link.";
           }
         }
       }

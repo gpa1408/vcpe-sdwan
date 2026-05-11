@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 # coding: utf-8
-
+import os
 import copy
 import json
 import logging
-import requests                                                                               #HTTP library used to send RESTCONF requests to the forwarder container.
+import requests                                                                                #HTTP library used to send RESTCONF requests to the forwarder container.
 
 logging.basicConfig(level=logging.INFO)
 
 class SteeringManager:
     def __init__(self):
-        self.base_url = "http://vcpe-forwarder:9090"
+        self.base_url = os.getenv("FORWARDER_URL", "http://vcpe-forwarder:9090")
         self.timeout = 5                                                                      #if the forwarder does not respond within 5 seconds, the request will fail.
         self.headers = {
             "Content-Type": "application/yang-data+json",                                     #tells forwarder that the requests are sending in YANG JSON format. 
@@ -56,7 +56,7 @@ class SteeringManager:
                 action=action,
                 reason=str(e),
             )
-    def get_nat_state(self):                                                                 #poll NAT status from forwarder
+    def get_nat_state_from_forwarder(self):                                                                 #poll NAT status from forwarder
         url = f"{self.base_url}/restconf/data/forwarder:nat-state"
         response = requests.get(
             url,
@@ -65,6 +65,24 @@ class SteeringManager:
         )
         response.raise_for_status()
         return response.json()
+
+    def store_nat_status_in_datastore(self, wan_name, nat_type):
+        if not wan_name or not nat_type:
+            return False
+
+        state_dir = "/var/lib/clixon/wan-link-nat-types"                                           # directory where nat-type files will be stored
+        state_file = f"{state_dir}/{wan_name}.nat"                                                 # builds the filename for each wan-link
+
+        try:
+            os.makedirs(state_dir, exist_ok=True)                                                  # creates the directory /var/lib/clixon/wan-link-nat-types if it does not already exist
+            with open(state_file, "w") as f:
+                f.write(nat_type)
+            logging.info("Stored nat-type for wan link %s in runtime state file %s", wan_name, state_file)
+            return True
+    
+        except Exception as e:
+            logging.exception("Failed to store nat-type runtime file for %s: %s", wan_name,e)
+            return False
     
     # ============================================================
     # Action handlers
@@ -81,24 +99,22 @@ class SteeringManager:
 
         address_mode = params.get("address-mode")
         
-        payload = {                                                                           # Builds the JSON payload to send.
-            "nat-check-required": action.get("nat-check-required"),
+        payload = {
             "wan-link": {
-                "name": name,
+                "nat-check-required": action.get("nat-check-required"),
                 "interface-name": params.get("interface-name"),
-                "role": params.get("role"),
                 "admin-enabled": params.get("admin-enabled"),
-                "address-mode": address_mode,            },
-        }                                
+                "address-mode": address_mode,
+            }
+        }      
         if address_mode == "static":
             payload["wan-link"]["static-address"] = params.get("static-address")
             payload["wan-link"]["static-gateway"] = params.get("static-gateway")
-    
+        
         elif address_mode == "dhcp":
             payload["wan-link"]["dhcp-enabled"] = True
     
-        return self._patch(url, payload, action)
-        
+        return self._patch(url, payload, action)     
 
     def _apply_lan_link_config(self, action):                                                    # LAN link configuration
         name = action.get("name")
@@ -136,22 +152,17 @@ class SteeringManager:
 
         url = f"{self.base_url}/restconf/data/forwarder:tunnels/tunnel={name}"                    # Builds the Tunnel RESTCONF URL.
         payload = {
-            "tunnel": {
-                "name": name,
-                "bind-wan-link": params.get("bind-wan-link"),
-                "admin-enabled": params.get("admin-enabled"),
-                "local-address": params.get("local-address"),
-                "local-port": params.get("local-port"),
-                "local-public-key": params.get("local-public-key"),
-                "peer-address": params.get("peer-address"),
-                "peer-port": params.get("peer-port"),
-                "peer-public-key": params.get("peer-public-key"),
-                "allowed-prefix": params.get("allowed-prefix", []),
-                "keepalive-seconds": params.get("keepalive-seconds"),
-            },  
-            
+            "bind-wan-link": params.get("bind-wan-link"),
+            "admin-enabled": params.get("admin-enabled"),
+            "local-address": params.get("local-address"),
+            "local-port": params.get("local-port"),
+            "local-private-key": params.get("private-key"),
+            "peer-address": params.get("peer-address"),
+            "peer-port": params.get("peer-port"),
+            "peer-public-key": params.get("peer-public-key"),
+            "allowed-prefix": params.get("allowed-prefix", []),
+            "keepalive-seconds": params.get("keepalive-seconds"),   
         }
-
         return self._patch(url, payload, action)
 
     def _apply_firewall_rule(self, action):                                                              # apply-firewall rule
@@ -237,7 +248,7 @@ class SteeringManager:
         payload = {
             "steering": {
                 "class": traffic_class,
-                "eligible-paths": eligible_names,
+                "eligible-paths": eligible_paths,
                 "selected-path-type": action.get("selected-path-type"),
                 "decision-status": action.get("decision-status"),
                 "reason": action.get("reason"),
@@ -247,44 +258,41 @@ class SteeringManager:
             },
         }
 
-        return self._patch(url, payload, action)
-
-    # ============================================================
-    # PATCH request sender to forwarder
-    # ============================================================
-    """def _patch(self, url: str, payload, action):                                           #common helper that sends RESTCONF PATCH requests to forwarder
-        logging.info("PATCH %s", url)                                                      #Prints the target URL and the payload for debugging
+        return self._patch(url, payload, action) 
+   #==========================================================================================================
+   # Real PATCH sender to forwarder
+   #===========================================================================================================
+    def _patch(self, url: str, payload, action):
+        logging.info("PATCH %s", url)
         logging.info("Payload: %s", json.dumps(payload, indent=2))
 
-        response = requests.patch(                                                         #Sends the actual HTTP PATCH request to the forwarder.
+        response = requests.patch(
             url,
             headers=self.headers,
             data=json.dumps(payload),
             timeout=self.timeout,
         )
 
+        try:
+            response_body = response.json() if response.text else None
+        except Exception:
+            response_body = response.text
+
         if 200 <= response.status_code < 300:
             return {
                 "status": "success",
                 "http-status": response.status_code,
-            }    
+                "url": url,
+                "response": response_body,
+                "sent-action": action.get("action"),
+            }
+
         return {
             "status": "error",
             "http-status": response.status_code,
-        }"""
-   
-   #==========================================================================================================
-   #Test code without forwarder module. need to remove this once forwarder is present
-   #===========================================================================================================
-    def _patch(self, url: str, payload, action):                                         
-        logging.info("DRY-RUN PATCH %s", url)                                             
-        logging.info("Payload: %s", json.dumps(payload, indent=2))
-
-        return {
-            "status": "dry-run",
             "url": url,
-            "payload": payload,
-            "received-action": action.get("action"),
+            "response": response_body,
+            "sent-action": action.get("action"),
         }
     # ============================================================
     # Error message handler
