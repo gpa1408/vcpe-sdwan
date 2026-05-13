@@ -9,7 +9,6 @@
           <role>broadband</role>
           <admin-enabled>true</admin-enabled>
           <address-mode>dhcp</address-mode>
-          <nat-enabled>true</nat-enabled>
         </wan-link>
       </underlay>
     </interfaces>
