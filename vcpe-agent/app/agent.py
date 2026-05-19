@@ -711,7 +711,7 @@ class Agent:
         added = root.find("added")                                                          #contains newly added datastore objects
         if added is not None:
             for node in added.findall("node"):
-                parent_data = node.find("parent-data")
+                parent_data = node.find("data")
                 parent_xml = self._first_child(parent_data)                                 #extracts the real changed object from parent-data
 
                 operations.extend(
