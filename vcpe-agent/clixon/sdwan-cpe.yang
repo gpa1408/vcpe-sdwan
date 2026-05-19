@@ -1,0 +1,1007 @@
+  module sdwan-cpe {
+  yang-version 1.1;
+  namespace "urn:sdwan:cpe";
+  prefix scpe;
+
+  import ietf-inet-types {
+    prefix inet;
+  }
+
+  import ietf-yang-types {
+  prefix yang;
+  }
+
+  organization
+    "Thesis SD-WAN CPE YANG model";
+  contact
+    "Author: Pamodi Ranathunga";
+  description
+    "YANG model for an SD-WAN CPE supporting underlay WAN links, LAN services, WireGuard-based overlays, traffic classification,
+     policy-based steering, firewall configuration, forwarder-facing path objects, path groups, NAT services, static routing, and
+     operational state reporting.";
+
+  revision 2026-05-12 {
+    description
+      "Revised  model aligned with SD-WAN Forwarder API.";
+  }
+
+  revision 2026-03-13 {
+    description
+      "revision4n";
+  }
+
+  /*
+   * ======================================================================================================
+   * Typedefs
+   * ======================================================================================================
+   */
+  typedef cpe-id {
+    type string {
+      length "1..64";
+    }
+    description
+      "Unique identifier of a CPE";
+  }
+
+  typedef if-name {
+    type string {
+      length "1..64";
+    }
+    description
+      "Interface name on the CPE, for example eth0, eth1";
+  }
+
+  typedef TL-id {
+    type enumeration {
+      enum UPL1;
+      enum UPL2;
+      enum UPL3;
+      enum UPL4;
+    }
+    description
+      "Transport link identifier";
+  }
+
+  typedef tunnel-name {
+    type string {
+      length "1..64";
+    }
+    description
+      "Overlay tunnel identifier, for example wg0 or wg1";
+  }
+
+  typedef class-name {
+    type string {
+      length "1..64";
+    }
+    description
+      "Traffic class name, for example voice, video, best-effort";
+  }
+
+  typedef priority {
+    type uint16 {
+      range "1..65535";
+    }
+    description
+      "Rule priority order.";
+  }
+
+  typedef wireguard-key {
+    type string {
+      pattern '[a-zA-Z0-9+/]{43}=';
+      length "44";
+    }
+    description "A WireGuard publi key (Base64 encoded, 44 chars).";
+  }
+
+  typedef percentage {
+    type decimal64 {
+      fraction-digits 2;
+      range "0 .. 100";
+    }
+    units "%";
+    description
+      "Percentage value from 0 to 100";
+  }
+
+  typedef port-number-or-any {
+    type union {
+      type uint16;
+      type enumeration {
+        enum any;
+      }
+    }
+    description
+      "A single L4 port or the special value any";
+  }
+
+  /*
+   * ===========================================================================================================
+   * Root
+   * ===========================================================================================================
+   */
+  container sdwan {
+    description
+      "Root container for SD-WAN CPE configuration and operational state";
+
+    /*
+     * ==================================================================================
+     * System Details
+     * ==================================================================================
+     */
+    container system {
+      description
+        "Local CPE system identity and management information.";
+
+      leaf local-cpe-id {
+        type cpe-id;
+        mandatory true;
+        description
+          "Unique identifier of this CPE";
+      }
+
+      leaf hostname {
+        type string;
+        description
+          "Hostname of this CPE.";
+      }
+
+      leaf management-ip {
+        type inet:ipv4-address;
+        description
+          "Management IP address of this CPE.";
+      }
+    }
+    
+    /*
+     * ==================================================================================
+     * CPE Interface roles
+     * ==================================================================================
+     */
+    container interfaces {
+      description
+        "Logical grouping of WAN and LAN interfaces";
+
+      /*
+       * ===================================================================================
+       * 1. Underlay (WAN Links)
+       * ===================================================================================
+       */
+      container underlay {
+        description
+          "Physical or logical WAN links used to reach the transport network";
+
+        list wan-link {
+          key "name";
+          unique "interface-name";
+          description
+            "A WAN uplink such as fiber, broadband, LTE, or IPVPN";
+
+          leaf name {
+            type TL-id;
+            description
+              "Transport link identifier of the WAN interface";
+          }
+
+          leaf interface-name {
+            type if-name;
+            description
+              "Interface name of the Transport link identifier";
+          }
+
+          leaf role {
+            type enumeration {
+              enum broadband;
+              enum fiber;
+              enum lte;
+              enum ipvpn;
+            }
+            description
+              "Administrative role or access type of this WAN link";
+          }
+
+          leaf admin-enabled {
+            type boolean;
+            default "true";
+            description
+              "Administrative enable or disable";
+          }
+
+          leaf address-mode {
+            type enumeration {
+              enum dhcp;
+              enum static;
+            }
+            default "dhcp";
+            description
+              "IPv4 address assignment mode";
+          }
+
+          leaf static-address {
+            when "../address-mode = 'static'";
+            type inet:ipv4-prefix;
+            description
+              "Static IPv4 address with prefix length, for example 192.0.2.10/24";
+          }
+
+          leaf static-gateway {
+            when "../address-mode = 'static'";
+            type inet:ipv4-address;
+            mandatory true;
+            description
+              "Default IPv4 gateway for static configuration";
+          }
+        }
+      }
+
+      /*
+       * =============================================================================
+       * 2. LAN side
+       * =============================================================================
+       */
+      container lan {
+        description
+          "LAN-facing interfaces and local subnet services";
+
+        list lan-link {
+          key "name";
+          description
+            "A LAN interface identifier";
+
+          leaf name {
+            type if-name;
+            description
+              "LAN interface name, for example eth0 or eth2";
+          }
+
+          leaf bridge-name {
+            type if-name;
+            description
+              "Optional bridge interface name used by the forwarder, for example br-lan";
+          }
+
+          leaf-list member-interface {
+            type if-name;
+            description
+              "Optional LAN member interfaces that can be attached to the bridge";
+          }
+
+          leaf admin-enabled {
+            type boolean;
+            default "true";
+            description
+              "Administrative enable or disable";
+          }
+
+          leaf ipv4-prefix {
+            type inet:ipv4-prefix;
+            description
+              "LAN IPv4 subnet, for example 10.10.0.1/24";
+          }
+
+          /*==========================LAN Services===========================*/
+          container dhcp-server {
+            description
+              "Simple DHCP server settings for the LAN";
+
+            leaf enabled {
+              type boolean;
+              default "false";
+              description
+                "DHCP server enable or disable";
+            }
+
+            leaf pool-start {
+              when "../enabled = 'true'";
+              type inet:ipv4-address;
+              description
+                "Start IPv4 address in the DHCP pool";
+            }
+
+            leaf pool-end {
+              when "../enabled = 'true'";
+              type inet:ipv4-address;
+              description
+                "Last IPv4 address in the DHCP pool";
+            }
+
+            leaf dns-server {
+              when "../enabled = 'true'";
+              type inet:ipv4-address;
+              description
+                "DNS server offered to clients";
+            }
+
+            leaf lease-time-seconds {
+              when "../enabled = 'true'";
+              type uint32;
+              default "86400";
+              description
+                "DHCP lease time in seconds";
+            }
+          }
+        }
+      }
+    }
+
+    /*
+     * ==============================================================================
+     * 3. Overlay tunnels (WireGuard)
+     * ==============================================================================
+     */
+    container overlay {
+      description
+        "WireGuard-based overlay tunnels used for SD-WAN connectivity";
+
+      list tunnel {
+        key "name";
+        description
+          "An overlay tunnel instance";
+
+        leaf name {
+          type tunnel-name;
+          description
+            "Tunnel name";
+        }
+
+        leaf bind-wan-link {
+          type leafref {
+            path "/scpe:sdwan/scpe:interfaces/scpe:underlay/scpe:wan-link/scpe:name";
+          }
+          mandatory true;
+          description
+            "Local WAN link (Transport link Identifier) used by this CPE to establish the tunnel";
+        }
+
+        leaf admin-enabled {
+          type boolean;
+          default "true";
+          description
+            "Administrative enable or disable";
+        }
+
+        leaf local-address {
+          type inet:ipv4-address;
+          description
+            "Local source IPv4 address used for the tunnel endpoint";
+        }
+
+        leaf local-port {
+          type inet:port-number;
+          default "51820";
+          description
+            "Local WireGuard UDP port";
+        }
+
+        leaf mtu {
+          type uint16 {
+            range "576..9000";
+          }
+          default "1420";
+          description
+            "WireGuard tunnel MTU used by the forwarder.";
+        }
+
+        leaf local-public-key {
+          config false;
+          type wireguard-key;
+          description
+            "WireGuard public key generated by the CPE agent and exposed to the controller.";
+        }
+
+        leaf remote-cpe-id {
+          type string;
+          mandatory true;
+          description
+            "Identifier of the remote CPE that this tunnel should connect to.";
+        }
+
+        leaf remote-tunnel-name {
+          type string;
+          mandatory true;
+          description
+            "Tunnel name on the remote CPE. The controller uses remote-cpe-id and remote-tunnel-name to find the matching tunnel in the peer CPE datastore.";
+        }
+
+        container resolved-peer {
+          leaf peer-address {
+            type inet:ipv4-address;
+            mandatory true;
+            description
+              "Remote WireGuard peer IPv4 address";
+          }
+
+          leaf peer-port {
+            type inet:port-number;
+            default "51820";
+            description
+              "Remote WireGuard peer UDP port";
+          }
+
+          leaf peer-public-key {
+            type wireguard-key;
+            mandatory true;
+            description "Peer WireGuard Public Key";
+          }
+
+          leaf-list allowed-prefix {
+            type inet:ip-prefix;
+            min-elements 1;
+            description
+              "Allowed/routed prefixes at peer via this overlay tunnel";
+          }
+        }
+
+        leaf keepalive-seconds {
+          type uint16;
+          default "25";
+          description
+            "Persistent keepalive interval in seconds";
+        }
+      }
+    }
+
+    /*
+     * =========================================================================================
+     * Traffic classification
+     * =========================================================================================
+     */
+    container traffic {
+      description
+        "Traffic class definitions and match criteria";
+
+      list class {
+        key "name";
+        description
+          "Named traffic class";
+
+        leaf name {
+          type class-name;
+          description
+            "Traffic class name";
+        }
+
+        container five-tuple {
+          description
+            "Five-tuple match criteria for packet classification";
+
+          leaf src-prefix {
+            type inet:ip-prefix;
+            description
+              "Source prefix to match";
+          }
+
+          leaf dst-prefix {
+            type inet:ip-prefix;
+            description
+              "Destination prefix to match";
+          }
+
+          leaf l4-protocol {
+            type enumeration {
+              enum tcp;
+              enum udp;
+              enum icmp;
+              enum any;
+            }
+            default "any";
+            description
+              "Layer 4 protocol to match";
+          }
+
+          leaf src-port {
+            when "../l4-protocol = 'tcp' or ../l4-protocol = 'udp'";
+            type port-number-or-any;
+            default "any";
+            description
+              "Single source port match, or any";
+          }
+
+          leaf dst-port {
+            when "../l4-protocol = 'tcp' or ../l4-protocol = 'udp'";
+            type port-number-or-any;
+            default "any";
+            description
+              "Single destination port match, or any";
+          }
+        }
+      }
+    }
+
+    /*
+     * ===================================================================================
+     * Steering policy / Service Level Objective (SLO)
+     * ===================================================================================
+     */
+    container policy {
+      description
+        "Maps traffic classes to steering behavior and SLO constraints";
+
+      list steering {
+        key "class";
+        description
+          "Steering rule for a traffic class";
+
+        leaf class {
+          type leafref {
+            path "/scpe:sdwan/scpe:traffic/scpe:class/scpe:name";
+          }
+          description
+            "Traffic class to which this policy applies";
+        }
+
+        leaf max-latency-ms {
+          type uint32;
+          units "ms";
+          description
+            "Maximum acceptable latency";
+        }
+
+        leaf max-jitter-ms {
+          type uint32;
+          units "ms";
+          description
+            "Maximum acceptable jitter";
+        }
+
+        leaf max-loss-percent {
+          type percentage;
+          description
+            "Maximum acceptable packet loss percentage";
+        }
+
+        leaf min-bandwidth-kbps {
+          type uint32;
+          units "kbps";
+          description
+            "Minimum required bandwidth";
+        }
+
+        leaf steering-mode {
+          type enumeration {
+            enum load-balance;
+            enum failover;
+          }
+          default "failover";
+          description
+            "Traffic steering method";
+        }
+
+        leaf load-balance-link-type {
+          when "../steering-mode = 'load-balance'";
+          type enumeration {
+            enum tunnel;
+            enum wan-link;
+            enum path-group;
+          }
+          mandatory true;
+          description
+            "Traffic steering method";
+        }
+
+        leaf-list load-balance-tunnel {
+          when "../steering-mode = 'load-balance' and ../load-balance-link-type = 'tunnel'";
+          type leafref {
+            path "/scpe:sdwan/scpe:overlay/scpe:tunnel/scpe:name";
+          }
+          description
+            "Overlay tunnel names used for load balancing";
+        }
+
+        leaf-list load-balance-wan-link {
+          when "../steering-mode = 'load-balance' and ../load-balance-link-type = 'wan-link'";
+          type leafref {
+            path "/scpe:sdwan/scpe:interfaces/scpe:underlay/scpe:wan-link/scpe:name";
+          }
+          description
+            "Underlay transport link IDs used for load balancing";
+        }
+
+        leaf failover-link-type {
+          when "../steering-mode = 'failover'";
+          type enumeration {
+            enum tunnel;
+            enum wan-link;
+            enum path-group;
+          }
+          mandatory true;
+          description
+            "Traffic steering method";
+        }
+
+        leaf primary-tunnel {
+          when "../steering-mode = 'failover' and ../failover-link-type = 'tunnel'";
+          mandatory true;
+          type leafref {
+            path "/scpe:sdwan/scpe:overlay/scpe:tunnel/scpe:name";
+          }
+          description
+            "Primary preferred overlay tunnel";
+        }
+
+        leaf primary-wan-link {
+          when "../steering-mode = 'failover' and ../failover-link-type = 'wan-link'";
+          mandatory true;
+          type leafref {
+            path "/scpe:sdwan/scpe:interfaces/scpe:underlay/scpe:wan-link/scpe:name";
+          }
+          description
+            "Primary preferred underlay link";
+        }
+
+        leaf-list secondary-tunnel {
+          when "../steering-mode = 'failover' and ../failover-link-type = 'tunnel'";
+          ordered-by user;
+          type leafref {
+            path "/scpe:sdwan/scpe:overlay/scpe:tunnel/scpe:name";
+          }
+          description
+            "Secondary preferred overlay tunnel(s) use when the primary tunnel is down";
+        }
+
+        leaf-list secondary-wan-link {
+          when "../steering-mode = 'failover' and ../failover-link-type = 'wan-link'";
+          ordered-by user;
+          type leafref {
+            path "/scpe:sdwan/scpe:interfaces/scpe:underlay/scpe:wan-link/scpe:name";
+          }
+          description
+            "Secondary preferred underlay link(s) used when the primary link is down";
+        }
+      }
+    }
+
+    /*
+     * =====================================================================================================
+     * Firewall
+     * =====================================================================================================
+     */
+    container firewall {
+      description
+        "Firewall configuration";
+
+      list rule {
+        key "id";
+        description
+          "Firewall rule";
+
+        leaf id {
+          type string {
+            length "1..64";
+          }
+          description
+            "Firewall rule identifier";
+        }
+
+        leaf priority {
+          type priority;
+          description
+            "Priority order of firewall rules which need to execute";
+        }
+
+        leaf action {
+          type enumeration {
+            enum allow;
+            enum deny;
+          }
+          mandatory true;
+          description
+            "Firewall action";
+        }
+
+        leaf src-prefix {
+          type inet:ip-prefix;
+          description
+            "Source prefix to match";
+        }
+
+        leaf dst-prefix {
+          type inet:ip-prefix;
+          description
+            "Destination prefix to match";
+        }
+
+        leaf l4-protocol {
+          type enumeration {
+            enum tcp;
+            enum udp;
+            enum icmp;
+            enum any;
+          }
+          default "any";
+          description
+            "Layer 4 protocol to match";
+        }
+
+        leaf-list src-port {
+          when "../l4-protocol = 'tcp' or ../l4-protocol = 'udp'";
+          type port-number-or-any;
+          description
+            "One or more source ports to match, or any";
+        }
+
+        leaf-list dst-port {
+          when "../l4-protocol = 'tcp' or ../l4-protocol = 'udp'";
+          type port-number-or-any;
+          description
+            "One or more destination ports to match, or any";
+        }
+
+        leaf log {
+          type boolean;
+          default "false";
+          description
+            "Enable logging for matched packets";
+        }
+      }
+    }
+
+    /*
+     * =================================================================================
+     * Operational state
+     * =================================================================================
+     */
+    container state {
+      config false;
+      description
+        "Operational state reported by the CPE agent";
+
+      list wan-link-state {
+        key "name";
+        description
+          "Live state of WAN links";
+
+        leaf name {
+          type leafref {
+            path "/scpe:sdwan/scpe:interfaces/scpe:underlay/scpe:wan-link/scpe:name";
+          }
+          description
+            "WAN link identifier";
+        }
+
+        leaf oper-status {
+          type enumeration {
+            enum up;
+            enum down;
+            enum degraded;
+          }
+          description
+            "Current link operational status";
+        }
+
+        leaf ipv4-address {
+          type inet:ipv4-address;
+          description
+            "Current IPv4 address on the WAN link";
+        }
+
+        leaf gateway-reachable {
+          type boolean;
+          description
+            "Whether the configured or learned gateway is reachable";
+        }
+        
+        leaf nat-type {
+          type enumeration {
+            enum unknown;
+            enum none;
+            enum full-cone;
+            enum restricted-cone;
+            enum port-restricted-cone;
+            enum symmetric;
+            enum skipped;
+          }
+          description
+              "Detected NAT type of this WAN link.";
+          }        
+
+        leaf latency-ms {
+          type uint32;
+          units "ms";
+          description
+            "Measured latency";
+        }
+
+        leaf jitter-ms {
+          type uint32;
+          units "ms";
+          description
+            "Measured jitter";
+        }
+
+        leaf loss-percent {
+          type percentage;
+          description
+            "Measured packet loss percentage";
+        }
+
+        leaf available-bandwidth-kbps {
+          type uint32;
+          units "kbps";
+          description
+            "Estimated available bandwidth";
+        }
+      }
+
+      list tunnel-state {
+        key "name";
+        description
+          "Live state and quality metrics per tunnel";
+
+        leaf name {
+          type leafref {
+            path "/scpe:sdwan/scpe:overlay/scpe:tunnel/scpe:name";
+          }
+          description
+            "Tunnel name";
+        }
+
+        leaf oper-status {
+          type enumeration {
+            enum up;
+            enum down;
+            enum degraded;
+          }
+          description
+            "Tunnel health status";
+        }
+
+        leaf active-wan-link {
+          type leafref {
+            path "/scpe:sdwan/scpe:interfaces/scpe:underlay/scpe:wan-link/scpe:name";
+          }
+          description
+            "WAN link currently carrying the tunnel";
+        }
+
+        leaf latency-ms {
+          type uint32;
+          units "ms";
+          description
+            "Measured latency";
+        }
+
+        leaf jitter-ms {
+          type uint32;
+          units "ms";
+          description
+            "Measured jitter";
+        }
+
+        leaf loss-percent {
+          type percentage;
+          description
+            "Measured packet loss percentage";
+        }
+
+        leaf available-bandwidth-kbps {
+          type uint32;
+          units "kbps";
+          description
+            "Estimated available bandwidth";
+        }
+
+        leaf-list active-class {
+          type leafref {
+            path "/scpe:sdwan/scpe:traffic/scpe:class/scpe:name";
+          }
+          description
+            "Traffic classes currently steered over this tunnel";
+        }
+      }
+
+      list traffic-class-state {
+        key "name";
+        description
+          "Operational steering state per traffic class.";
+
+        leaf name {
+          type leafref {
+            path "/scpe:sdwan/scpe:traffic/scpe:class/scpe:name";
+          }
+          description
+            "Traffic class name.";
+        }
+
+        list active-forwarding-member {
+          key "name";
+          description
+            "Currently selected WAN links, tunnels, or generated forwarder paths used for this traffic class.";
+
+          leaf name {
+            type string;
+            description
+              "Name of the active forwarding member. This can be a WAN link name, tunnel name, or internally generated forwarder path name.";
+          }
+
+          leaf type {
+            type enumeration {
+              enum wan-link;
+              enum tunnel;
+              enum generated-path;
+            }
+            mandatory true;
+            description
+              "Type of active forwarding member.";
+          }
+        }
+
+        leaf reason {
+          type string;
+          description
+            "Reason for the current steering decision.";
+        }
+
+        leaf last-updated {
+          type yang:date-and-time;
+          description
+            "Time when the agent last updated this steering state.";
+        }
+      }
+
+      container cpe-state {
+        config false;
+        description
+          "Overall operational state of this CPE.";
+
+        leaf oper-status {
+          type enumeration {
+            enum up;
+            enum degraded;
+            enum down;
+            enum unknown;
+          }
+          description
+            "Overall CPE operational status.";
+        }
+
+        leaf power-status {
+          type enumeration {
+            enum powered-on;
+            enum power-down;
+            enum rebooting;
+            enum unknown;
+          }
+          description
+            "Power or availability status of this CPE.";
+        }
+
+        leaf forwarder-status {
+          type enumeration {
+            enum healthy;
+            enum degraded;
+            enum down;
+            enum unknown;
+          }
+          description
+            "Forwarder health status collected from the forwarder.";
+        }
+
+        leaf forwarder-version {
+          type string;
+          description
+            "Forwarder software version.";
+        }
+
+        leaf uptime-seconds {
+          type uint64;
+          units "seconds";
+          description
+            "CPE or forwarder uptime.";
+        }
+
+        leaf last-seen {
+          type yang:date-and-time;
+          description
+            "Last time the agent/controller received a successful response from this CPE.";
+        }
+
+        leaf status-reason {
+          type string;
+          description
+            "Reason for the current CPE status.";
+        }
+      }
+    }
+  }
+}

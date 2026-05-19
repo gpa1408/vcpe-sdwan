@@ -7,6 +7,12 @@ RESTCONF_BIN="/usr/local/sbin/clixon_restconf"
 
 mkdir -p /var/lib/clixon
 mkdir -p /run/clixon
+mkdir -p /var/lib/sdwan-cpe/keys
+mkdir -p /var/lib/clixon/local-public-keys
+mkdir -p /var/lib/clixon/wan-link-nat-types
+
+rm -f /run/clixon/clixon.sock
+rm -f /run/clixon/clixon_backend.pid
 
 if [ ! -f /var/lib/clixon/startup_db ] && [ -f /etc/clixon/startup_db ]; then
   cp /etc/clixon/startup_db /var/lib/clixon/startup_db
@@ -26,6 +32,43 @@ cleanup() {
 
 trap cleanup INT TERM
 
+echo "[entrypoint] starting python agent..."
+python3 -u /app/agent.py &
+AGENT_PID=$!
+
+echo "[entrypoint] waiting for python agent callback server..."
+i=0
+while true; do
+  if python3 - <<'PY'
+import socket
+s = socket.socket()
+s.settimeout(1)
+try:
+    s.connect(("127.0.0.1", 8080))
+    s.close()
+except Exception:
+    raise SystemExit(1)
+PY
+  then
+    break
+  fi
+
+  i=$((i+1))
+  if [ "$i" -ge 30 ]; then
+    echo "[entrypoint] python agent callback server failed to start"
+    cleanup
+    exit 1
+  fi
+
+  if ! kill -0 "$AGENT_PID" 2>/dev/null; then
+    echo "[entrypoint] python agent exited before callback server became ready"
+    cleanup
+    exit 1
+  fi
+
+  sleep 1
+done
+
 echo "[entrypoint] starting clixon_backend..."
 "$BACKEND_BIN" -s running -f "$CFG"
 
@@ -35,6 +78,7 @@ while [ ! -S /run/clixon/clixon.sock ] || [ ! -f /run/clixon/clixon_backend.pid 
   i=$((i+1))
   if [ "$i" -ge 15 ]; then
     echo "[entrypoint] clixon_backend failed to create socket/pidfile"
+    cleanup
     exit 1
   fi
   sleep 1
@@ -57,10 +101,6 @@ while true; do
   fi
   sleep 1
 done
-
-echo "[entrypoint] starting python agent..."
-python3 -m app.main &
-AGENT_PID=$!
 
 EXIT_CODE=0
 
