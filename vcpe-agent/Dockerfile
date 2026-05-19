@@ -48,13 +48,13 @@ RUN mkdir -p /tmp/clixon-plugins && \
       /tmp/clixon_config_diff_callback_plugin.c \
       -I/usr/local/include \
       -L/usr/local/lib \
-      -lclixon -lcligen && \
+      -lclixon -lcligen -lcurl && \
     gcc -fPIC -shared \
       -o /tmp/clixon-plugins/clixon_state_callback_plugin.so \
       /tmp/clixon_state_callback_plugin.c \
       -I/usr/local/include \
       -L/usr/local/lib \
-      -lclixon -lcligen -lcurl
+      -lclixon -lcligen
 
 
 FROM python:3.13-alpine3.21
