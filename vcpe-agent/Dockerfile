@@ -98,7 +98,8 @@ COPY clixon/ /etc/clixon/
 COPY entrypoint.sh /entrypoint.sh
 
 RUN mkdir -p /etc/clixon/yang && \
-    cp /usr/local/share/clixon/clixon-restconf*.yang /etc/clixon/yang/ || true
+    cp /usr/local/share/clixon/clixon-restconf*.yang /etc/clixon/yang/ || true && \
+    cp /etc/clixon/sdwan-cpe.yang /etc/clixon/yang/sdwan-cpe.yang
 
 RUN chmod +x /entrypoint.sh && \
     mkdir -p \
