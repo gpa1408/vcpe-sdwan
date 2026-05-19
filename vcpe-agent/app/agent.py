@@ -29,7 +29,7 @@ class Agent:
 
         self.generated_tunnel_keys = {}                                               # stores generated WireGuard keys during the current agent runtime
         self.forwarder_base_url = "http://vcpe-forwarder:9090"                       # fixed forwarder API URL used by the agent
-        self.forwarder_dry_run = True                                                 # Since forwarder is not ready yet,a dry-run will be enabled by default (false send real API calls)
+        self.forwarder_dry_run = False                                                # Since forwarder is not ready yet,a dry-run will be enabled by default (false send real API calls)
 
     # =====================================================================================
     # Basic helpers
