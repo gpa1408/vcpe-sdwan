@@ -604,6 +604,21 @@ class Agent:
 
         if object_type == "resolved-peer":
             return self._build_resolved_peer_operations(parent_dict, changed_leafs, delete)
+        
+        if object_type == "firewall":
+            operations = []
+            rules = self._as_list(parent_dict.get("rule"))
+
+            for rule in rules:
+                operations.extend(
+                    self._build_firewall_rule_operations(
+                        rule,
+                        changed_leafs,
+                        delete
+                    )
+                )
+
+            return operations
 
         if object_type == "rule":
             return self._build_firewall_rule_operations(parent_dict, changed_leafs, delete)
