@@ -619,6 +619,59 @@ class Agent:
                 )
 
             return operations
+        
+        if object_type == "interfaces":
+            operations = []
+
+            underlay = parent_dict.get("underlay", {})
+            for wan in self._as_list(underlay.get("wan-link")):
+                operations.extend(
+                    self._build_wan_link_operations(
+                        wan,
+                        changed_leafs,
+                        delete
+                    )
+                )
+
+        lan = parent_dict.get("lan", {})
+        for lan_link in self._as_list(lan.get("lan-link")):
+            operations.extend(
+                self._build_lan_link_operations(
+                    lan_link,
+                    changed_leafs,
+                    delete
+                )
+            )
+
+        return operations
+
+        if object_type == "underlay":
+            operations = []
+
+            for wan in self._as_list(parent_dict.get("wan-link")):
+                operations.extend(
+                    self._build_wan_link_operations(
+                        wan,
+                        changed_leafs,
+                        delete
+                    )
+                )
+
+            return operations
+
+        if object_type == "lan":
+            operations = []
+
+            for lan_link in self._as_list(parent_dict.get("lan-link")):
+                operations.extend(
+                    self._build_lan_link_operations(
+                        lan_link,
+                        changed_leafs,
+                        delete
+                    )
+                )
+
+            return operations
 
         if object_type == "rule":
             return self._build_firewall_rule_operations(parent_dict, changed_leafs, delete)
