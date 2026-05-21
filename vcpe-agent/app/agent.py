@@ -29,7 +29,7 @@ class Agent:
 
         self.generated_tunnel_keys = {}                                               # stores generated WireGuard keys during the current agent runtime
         self.forwarder_base_url = "http://vcpe-forwarder:9090"                       # fixed forwarder API URL used by the agent
-        self.forwarder_dry_run = False                                                # Since forwarder is not ready yet,a dry-run will be enabled by default (false send real API calls)
+        self.forwarder_dry_run = True                                                 # Since forwarder is not ready yet,a dry-run will be enabled by default (false send real API calls)
 
     # =====================================================================================
     # Basic helpers
@@ -313,6 +313,7 @@ class Agent:
     # =====================================================================================
     def _build_wan_link_operations(self, parent_dict, changed_leafs, delete=False):
         name = parent_dict.get("name")
+        route_set_id = f"{name}-default"
         interface_name = parent_dict.get("interface-name")
         role = parent_dict.get("role")
         admin_enabled = self._bool_value(parent_dict.get("admin-enabled"))
@@ -331,7 +332,7 @@ class Agent:
 
         if delete:
             operations.append(self._operation("PUT", f"/api/v1/interfaces/{interface_name}/state", {"state": "down"}))
-            operations.append(self._operation("DELETE", f"/api/v1/routes/static/{name}-default"))
+            operations.append(self._operation("DELETE", f"/api/v1/routes/static/{route_set_id}"))
             return operations
 
         if self._has_change(changed_leafs, "admin-enabled") and admin_enabled is not None:
@@ -347,7 +348,7 @@ class Agent:
 
         if self._has_change(changed_leafs, "static-gateway", "address-mode", "interface-name"):
             if address_mode == "static" and static_gateway:
-                operations.append(self._operation("PUT", f"/api/v1/routes/static/{name}-default", {
+                operations.append(self._operation("PUT", f"/api/v1/routes/static/{route_set_id}", {
                     "routes": [{
                         "destination_cidr": "0.0.0.0/0",
                         "next_hop_ip": static_gateway,
@@ -355,7 +356,7 @@ class Agent:
                     }]
                 }))
             elif address_mode == "dhcp":
-                operations.append(self._operation("DELETE", f"/api/v1/routes/static/{name}-default"))
+                operations.append(self._operation("DELETE", f"/api/v1/routes/static/{route_set_id}"))
 
         return operations
 
@@ -604,74 +605,6 @@ class Agent:
 
         if object_type == "resolved-peer":
             return self._build_resolved_peer_operations(parent_dict, changed_leafs, delete)
-        
-        if object_type == "firewall":
-            operations = []
-            rules = self._as_list(parent_dict.get("rule"))
-
-            for rule in rules:
-                operations.extend(
-                    self._build_firewall_rule_operations(
-                        rule,
-                        changed_leafs,
-                        delete
-                    )
-                )
-
-            return operations
-        
-        if object_type == "interfaces":
-            operations = []
-
-            underlay = parent_dict.get("underlay", {})
-            for wan in self._as_list(underlay.get("wan-link")):
-                operations.extend(
-                    self._build_wan_link_operations(
-                        wan,
-                        changed_leafs,
-                        delete
-                    )
-                )
-
-        lan = parent_dict.get("lan", {})
-        for lan_link in self._as_list(lan.get("lan-link")):
-            operations.extend(
-                self._build_lan_link_operations(
-                    lan_link,
-                    changed_leafs,
-                    delete
-                )
-            )
-
-        return operations
-
-        if object_type == "underlay":
-            operations = []
-
-            for wan in self._as_list(parent_dict.get("wan-link")):
-                operations.extend(
-                    self._build_wan_link_operations(
-                        wan,
-                        changed_leafs,
-                        delete
-                    )
-                )
-
-            return operations
-
-        if object_type == "lan":
-            operations = []
-
-            for lan_link in self._as_list(parent_dict.get("lan-link")):
-                operations.extend(
-                    self._build_lan_link_operations(
-                        lan_link,
-                        changed_leafs,
-                        delete
-                    )
-                )
-
-            return operations
 
         if object_type == "rule":
             return self._build_firewall_rule_operations(parent_dict, changed_leafs, delete)
@@ -779,12 +712,12 @@ class Agent:
         added = root.find("added")                                                          #contains newly added datastore objects
         if added is not None:
             for node in added.findall("node"):
-                data = node.find("data")
-                added_xml = self._first_child(data)                                 #extracts the real changed object from parent-data
+                parent_data = node.find("parent-data")
+                parent_xml = self._first_child(parent_data)                                 #extracts the real changed object from parent-data
 
                 operations.extend(
                     self._build_operations_from_parent_xml(
-                        added_xml,
+                        parent_xml,
                         ["*"],
                         delete=False))
 
