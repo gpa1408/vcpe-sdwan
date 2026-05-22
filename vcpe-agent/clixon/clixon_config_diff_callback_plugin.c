@@ -32,33 +32,98 @@ append_xml_node(cbuf *cb, cxobj *x)
     return 0;
 }
 
+/*
+ * Return true if this is a nested container where the agent needs
+ * the keyed parent list entry instead of only the immediate container.
+ *
+ * Examples:
+ *   five-tuple    -> parent class
+ *   dhcp-server   -> parent lan-link
+ *   resolved-peer -> parent tunnel
+ */
+static int
+is_nested_container_for_agent(const char *name)
+{
+    if (name == NULL)
+        return 0;
+
+    if (strcmp(name, "five-tuple") == 0)
+        return 1;
+
+    if (strcmp(name, "dhcp-server") == 0)
+        return 1;
+
+    if (strcmp(name, "resolved-peer") == 0)
+        return 1;
+
+    return 0;
+}
+
 
 /*
- * Append parent XML node of a changed node.
+ * Append useful parent XML node of a changed node.
  *
- * Example:
- *   changed node = <static-address>192.168.1.20/24</static-address>
- *   parent node  = <wan-link>...</wan-link>
+ * Normal case:
+ *   changed node = <static-address>...</static-address>
+ *   parent-data  = <wan-link>...</wan-link>
+ *
+ * Nested-container case:
+ *   changed node = <dst-port>5121</dst-port>
+ *   immediate parent = <five-tuple>...</five-tuple>
+ *   useful parent-data = <class><name>video</name><five-tuple>...</five-tuple></class>
  */
 static int
 append_parent_xml_node(cbuf *cb, cxobj *x)
 {
     cxobj *parent = NULL;
+    cxobj *grandparent = NULL;
+    const char *xname = NULL;
+    const char *parent_name = NULL;
 
     if (x == NULL)
         return 0;
 
+    xname = xml_name(x);
     parent = xml_parent(x);
 
     if (parent == NULL)
         parent = x;
+
+    /*
+     * Case 1:
+     * The changed node itself is a nested container, for example:
+     *   x = <five-tuple>...</five-tuple>
+     * Then send its keyed parent:
+     *   <class>...</class>
+     */
+    if (is_nested_container_for_agent(xname)) {
+        grandparent = xml_parent(x);
+        if (grandparent != NULL)
+            parent = grandparent;
+    }
+    else {
+        /*
+         * Case 2:
+         * The changed node is a leaf inside a nested container, for example:
+         *   x = <dst-port>5121</dst-port>
+         *   parent = <five-tuple>...</five-tuple>
+         * Then send the keyed parent:
+         *   <class>...</class>
+         */
+        parent_name = xml_name(parent);
+
+        if (is_nested_container_for_agent(parent_name)) {
+            grandparent = xml_parent(parent);
+            if (grandparent != NULL)
+                parent = grandparent;
+        }
+    }
 
     if (clixon_xml2cbuf(cb, parent, 0, 0, (char *)"", -1, 0) < 0)
         return -1;
 
     return 0;
 }
-
 
 /*
  * Append added or deleted nodes.
@@ -280,7 +345,6 @@ done:
 
     return ret;
 }
-
 
 /*
  * Validate callback.
