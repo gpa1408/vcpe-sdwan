@@ -386,12 +386,20 @@ class Agent:
             operations.append(self._operation("DELETE", f"/api/v1/services/dhcp/{target_interface}"))
             return operations
 
-        if bridge_name and self._has_change(changed_leafs, "name", "bridge-name", "member-interface", "admin-enabled"):
+        if bridge_name and self._has_change(changed_leafs, "name", "bridge-name", "admin-enabled"):
             bridge_payload = {"bridge_id": bridge_name}                                  # OpenAPI bridge payload requires bridge_id
-            if self._has_change(changed_leafs, "member-interface"):
-                bridge_payload["members"] = member_interfaces
             if self._has_change(changed_leafs, "admin-enabled") and admin_enabled is not None:
                 bridge_payload["admin_state"] = "up" if admin_enabled else "down"
+
+            operations.append(self._operation("PUT", f"/api/v1/bridges/{bridge_name}", bridge_payload))
+
+        if bridge_name and self._has_change(changed_leafs, "member-interface"):
+            operations.append(
+                self._operation("PUT", f"/api/v1/bridges/{bridge_name}/members",
+                                {"interfaces": member_interfaces}))
+
+            for member in member_interfaces:
+                operations.append(self._operation("PUT", f"/api/v1/interfaces/{member}/state", {"state": "up"}))
 
             operations.append(self._operation("PUT", f"/api/v1/bridges/{bridge_name}", bridge_payload))
 
@@ -401,7 +409,7 @@ class Agent:
 
         if not bridge_name and self._has_change(changed_leafs, "admin-enabled") and admin_enabled is not None:
             operations.append(
-                self._operation("PUT", f"/api/v1/interfaces/{name}/state",
+                self._operation("PUT", f"/api/v1/interfaces/{target_interface}/state",
                                 {"state": "up" if admin_enabled else "down"}))
 
         if self._has_change(changed_leafs, "ipv4-prefix", "bridge-name"):
