@@ -758,9 +758,9 @@ class Agent:
             "operations": operations,
             "forwarder_result": forwarder_result}
 
-    # =====================================================================================
-    # Runtime steering decisions
-    # =====================================================================================
+    # ===========================================================================================================
+    # Runtime steering decisions (Decisions made according to Metric values recived from Monitoring module)
+    # ===========================================================================================================
     def _candidate_satisfies_slo(self, candidate_state, policy):
         if not candidate_state:                                                            #If there is no state object, candidate is invalid.
             return False
@@ -944,7 +944,7 @@ class Agent:
 
         return decisions                                                                     #returns all steering decisions.
 
-        def _build_steering_operations(self, steering_decisions):
+    def _build_steering_operations(self, steering_decisions):
         operations = []
 
         for decision in steering_decisions:
