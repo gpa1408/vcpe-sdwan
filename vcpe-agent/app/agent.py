@@ -440,57 +440,57 @@ class Agent:
         return self._build_lan_link_operations(lan_link, changed_leafs, delete)
 
     def _build_tunnel_operations(self, parent_dict, changed_leafs, delete=False):
-        name = parent_dict.get("name")
-
+        tunnel_id = parent_dict.get("name")                                                                         # YANG tunnel/name is used as Forwarder tunnel_id
+    
         if isinstance(changed_leafs, str):
-            changed_leafs = [changed_leafs]                                               #allows the function to accept either one leaf or a list of leaves
-
-        if not name:
+            changed_leafs = [changed_leafs]                                                                         # allows the function to accept either one leaf or a list of leaves
+    
+        if not tunnel_id:
             logging.warning("Tunnel has no name")
             return []
-
+    
         if delete:
-            return [self._operation("DELETE", f"/api/v1/tunnels/wireguard/{name}")]
-
-        if name not in self.generated_tunnel_keys:
-            private_key, public_key, private_path = self._generate_wireguard_tunnel_keys(name)
+            return [self._operation("DELETE", f"/api/v1/tunnels/wireguard/{tunnel_id}")]
+    
+        if tunnel_id not in self.generated_tunnel_keys:
+            private_key, public_key, private_path = self._generate_wireguard_tunnel_keys(tunnel_id)
             if private_key and public_key:
-                self.generated_tunnel_keys[name] = {
+                self.generated_tunnel_keys[tunnel_id] = {
                     "private-key": private_key,
                     "public-key": public_key,
                     "private-path": private_path}
-
-        operations = []                                                                   #stores the forwarder operations generated for this object
-
+    
+        operations = []                                                                                          # stores the forwarder operations generated for this object
+    
         admin_enabled = self._bool_value(parent_dict.get("admin-enabled"))
         if self._has_change(changed_leafs, "admin-enabled") and admin_enabled is False:
-            operations.append(self._operation("DELETE", f"/api/v1/tunnels/wireguard/{name}"))
+            operations.append(self._operation("DELETE", f"/api/v1/tunnels/wireguard/{tunnel_id}"))
             return operations
-
+    
         tunnel_change_leafs = ["name", "local-port", "local-address", "mtu", "admin-enabled"]
         if self._has_change(changed_leafs, *tunnel_change_leafs):
             local_port = parent_dict.get("local-port")
             local_address = parent_dict.get("local-address")
             mtu = parent_dict.get("mtu")
-            private_path = self.generated_tunnel_keys.get(name, {}).get("private-path")
-
+            private_path = self.generated_tunnel_keys.get(tunnel_id, {}).get("private-path")
+    
             tunnel_payload = {}
             if private_path:
                 tunnel_payload["private_key_ref"] = f"file://{private_path}"
             self._add_if_not_none(tunnel_payload, "listen_port", int(local_port) if local_port else None)
             tunnel_payload["local_addresses"] = [local_address] if local_address else []
             self._add_if_not_none(tunnel_payload, "mtu", int(mtu) if mtu else None)
-            tunnel_payload["description"] = f"WireGuard tunnel {name}"
-
+            tunnel_payload["description"] = f"WireGuard tunnel {tunnel_id}"
+    
             if "listen_port" in tunnel_payload and "local_addresses" in tunnel_payload:
-                operations.append(self._operation("PUT", f"/api/v1/tunnels/wireguard/{name}", tunnel_payload))
-
+                operations.append(self._operation("PUT", f"/api/v1/tunnels/wireguard/{tunnel_id}", tunnel_payload))
+    
         peer_change_leafs = ["peer-address", "peer-port", "peer-public-key", "allowed-prefix", "keepalive-seconds", "resolved-peer"]
         if self._has_change(changed_leafs, *peer_change_leafs):
             peer_operation = self._build_wireguard_peer_operation(parent_dict)
             if peer_operation:
                 operations.append(peer_operation)
-
+    
         return operations
 
     def _build_resolved_peer_operations(self, parent_dict, changed_leafs, delete=False):
