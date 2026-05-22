@@ -309,7 +309,7 @@ class Agent:
         return {"status": "ok"}
 
     # =====================================================================================
-    # Build forwarder operations (changed node names + parent object dictionary)
+    # Build forwarder operations (for Clixon YANG Datastore config-diff triggered operations)
     # =====================================================================================
     def _build_wan_link_operations(self, parent_dict, changed_leafs, delete=False):
         name = parent_dict.get("name")
@@ -944,6 +944,53 @@ class Agent:
 
         return decisions                                                                     #returns all steering decisions.
 
+        def _build_steering_operations(self, steering_decisions):
+        operations = []
+
+        for decision in steering_decisions:
+            traffic_class = decision.get("traffic-class")
+            action = decision.get("action")
+
+            if not traffic_class:
+                continue
+
+            if action == "set-active-path":
+                payload = {
+                    "traffic_class": traffic_class,
+                    "selected_path": decision.get("selected-path"),
+                    "selected_path_type": decision.get("selected-path-type"),
+                    "decision_status": decision.get("decision-status"),
+                    "reason": decision.get("reason"),
+                    "candidate_summary": decision.get("candidate-summary", {})
+                }
+
+                operations.append(
+                    self._operation(
+                        "PUT",
+                        f"/api/v1/steering/{traffic_class}/active-path",
+                        payload
+                    )
+                )
+
+            elif action == "set-load-balance-policy":
+                payload = {
+                    "traffic_class": traffic_class,
+                    "eligible_paths": decision.get("eligible-paths", []),
+                    "selected_path_type": decision.get("selected-path-type"),
+                    "decision_status": decision.get("decision-status"),
+                    "reason": decision.get("reason"),
+                    "candidate_summary": decision.get("candidate-summary", {})
+                }
+
+                operations.append(
+                    self._operation(
+                        "PUT",
+                        f"/api/v1/steering/{traffic_class}/load-balance",
+                        payload
+                    )
+                )
+
+        return operations
     # =====================================================================================
     # Main cycle
     # =====================================================================================
@@ -986,18 +1033,25 @@ class Agent:
 
         steering_decisions = self._make_steering_decisions(current_config, wan_link_states, tunnel_states) #Makes steering decisions using current states and policies
 
-        result = {                                                                          #Build final result object
+        steering_operations = self._build_steering_operations(steering_decisions)
+
+        if steering_operations:
+            self._send_forwarder_transaction(
+                operations=steering_operations,
+                validate_only=False)
+            
+        result = {                                                                                         #Build final result object
             #"wan_link_states": wan_link_states,        #REMOVE COMMENT IF NEED TO TEST
             #"tunnel_states": tunnel_states,            #REMOVE COMMENT IF NEED TO TEST
             "decisions": steering_decisions}
 
-        logging.info("Agent runtime steering cycle completed")                               #Builds a summary dictionary of everything done in a cycle.
+        logging.info("Agent runtime steering cycle completed")                                            #Builds a summary dictionary of everything done in a cycle.
         print("\n===== STEERING DECISIONS =====")
-        print(json.dumps(result, indent=2))                                                  #Logs success message.
+        print(json.dumps(result, indent=2))                                                               #Logs success message.
 
         return result
 
-    def run_forever(self, interval_sec=5):                                                   # Repeat the full execution cycle continuously.
+    def run_forever(self, interval_sec=5):                                                                # Repeat the full execution cycle continuously.
         while True:
             try:
                 self.run_once()
