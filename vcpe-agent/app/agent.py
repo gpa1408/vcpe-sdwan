@@ -528,34 +528,33 @@ class Agent:
 
     def _build_firewall_rule_operations(self, parent_dict, changed_leafs, delete=False):
         rule_id = parent_dict.get("id")
-
+    
         if isinstance(changed_leafs, str):
-            changed_leafs = [changed_leafs]                                               #allows the function to accept either one leaf or a list of leaves
-
+            changed_leafs = [changed_leafs]
+    
         if not rule_id:
             logging.warning("Firewall rule has no id")
             return []
-
-        policy_id = f"firewall-rule-{rule_id}"
-
+    
         if delete:
-            return [self._operation("DELETE", f"/api/v1/flow-policies/{policy_id}")]
-
+            return [self._operation("DELETE", f"/api/v1/firewall/rules/{rule_id}")]
+    
         match = self._build_match_from_dict(parent_dict)
         action = parent_dict.get("action")
-
-        if action == "allow":
-            logging.info("No OpenAPI firewall allow action exists; skipping allow rule %s", rule_id)
-            return []
-
-        payload = {
+    
+        firewall_payload = {
+            "rule_id": rule_id,
+            "action": action,
             "match": match,
-            "action": {"type": "drop"},
-            "description": f"Firewall deny rule {rule_id}"
-        }
-        self._add_if_not_none(payload, "priority", int(parent_dict.get("priority")) if parent_dict.get("priority") else None)
-
-        return [self._operation("PUT", f"/api/v1/flow-policies/{policy_id}", payload)]
+            "log": self._bool_value(parent_dict.get("log")),
+            "description": f"Firewall {action} rule {rule_id}"}
+    
+        self._add_if_not_none(
+            firewall_payload,
+            "priority",
+            int(parent_dict.get("priority")) if parent_dict.get("priority") else None )
+    
+        return [self._operation("PUT", f"/api/v1/firewall/rules/{rule_id}", firewall_payload)]
 
     def _build_traffic_class_operations(self, parent_dict, changed_leafs, delete=False):
         class_name = parent_dict.get("name")
@@ -569,7 +568,7 @@ class Agent:
     def _build_five_tuple_operations(self, parent_dict, changed_leafs, delete=False):
         traffic_class = self._find_class_for_five_tuple(parent_dict)
         if not traffic_class:
-            logging.warning("Cannot map five-tuple callback to traffic class; update C plugin to send keyed parent class")
+            logging.warning("Cannot map 5 tuple callback to traffic class; update C plugin to send keyed parent class")
             return []
         return self._build_traffic_class_operations(traffic_class, changed_leafs, delete)
 
