@@ -171,40 +171,6 @@ class Agent:
             return None, None, None
 
     # =====================================================================================
-    # Config lookup helpers for nested callback parents
-    # =====================================================================================
-    def _get_current_config(self):
-        try:
-            return self.config_reader.get_intended_config()
-        except Exception as e:
-            logging.exception("Failed to read current config for nested callback resolution: %s", e)
-            return {}
-
-    def _find_lan_link_for_dhcp(self, dhcp_server):
-        current_config = self._get_current_config()
-        lan_links = current_config.get("interfaces", {}).get("lan", {}).get("lan-link", [])
-        for lan in self._as_list(lan_links):
-            if lan.get("dhcp-server") == dhcp_server:
-                return lan
-        return None
-
-    def _find_tunnel_for_resolved_peer(self, resolved_peer):
-        current_config = self._get_current_config()
-        tunnels = current_config.get("overlay", {}).get("tunnel", [])
-        for tunnel in self._as_list(tunnels):
-            if tunnel.get("resolved-peer") == resolved_peer:
-                return tunnel
-        return None
-
-    def _find_class_for_five_tuple(self, five_tuple):
-        current_config = self._get_current_config()
-        classes = current_config.get("traffic", {}).get("class", [])
-        for traffic_class in self._as_list(classes):
-            if traffic_class.get("five-tuple") == five_tuple:
-                return traffic_class
-        return None
-
-    # =====================================================================================
     # Publish operations data in Datastore
     # =====================================================================================
     def detect_and_store_nat_type(self, wan_name, interface_name, role):
@@ -432,13 +398,6 @@ class Agent:
     
         return operations
 
-    def _build_dhcp_server_operations(self, parent_dict, changed_leafs, delete=False):
-        lan_link = self._find_lan_link_for_dhcp(parent_dict)
-        if not lan_link:
-            logging.warning("Cannot map dhcp-server callback to lan-link; update C plugin to send keyed parent lan-link")
-            return []
-        return self._build_lan_link_operations(lan_link, changed_leafs, delete)
-
     def _build_tunnel_operations(self, parent_dict, changed_leafs, delete=False):
         tunnel_id = parent_dict.get("name")                                                                         # YANG tunnel/name is used as Forwarder tunnel_id
     
@@ -492,13 +451,6 @@ class Agent:
                 operations.append(peer_operation)
     
         return operations
-
-    def _build_resolved_peer_operations(self, parent_dict, changed_leafs, delete=False):
-        tunnel = self._find_tunnel_for_resolved_peer(parent_dict)
-        if not tunnel:
-            logging.warning("Cannot map resolved-peer callback to tunnel; update C plugin to send keyed parent tunnel")
-            return []
-        return self._build_tunnel_operations(tunnel, changed_leafs, delete)
 
     def _build_wireguard_peer_operation(self, tunnel):
         name = tunnel.get("name")
@@ -598,13 +550,6 @@ class Agent:
         }
     
         return [self._operation("PUT", f"/api/v1/flow-policies/{policy_id}", payload)]
-        
-    def _build_five_tuple_operations(self, parent_dict, changed_leafs, delete=False):
-        traffic_class = self._find_class_for_five_tuple(parent_dict)
-        if not traffic_class:
-            logging.warning("Cannot map 5 tuple callback to traffic class; update C plugin to send keyed parent class")
-            return []
-        return self._build_traffic_class_operations(traffic_class, changed_leafs, delete)
 
     def _build_match_from_dict(self, parent_dict):
         match = {}                                                                         #traffic match fields such as prefixes, ports and protocol
@@ -632,23 +577,14 @@ class Agent:
         if object_type == "lan-link":
             return self._build_lan_link_operations(parent_dict, changed_leafs, delete)
 
-        if object_type == "dhcp-server":
-            return self._build_dhcp_server_operations(parent_dict, changed_leafs, delete)
-
         if object_type == "tunnel":
             return self._build_tunnel_operations(parent_dict, changed_leafs, delete)
-
-        if object_type == "resolved-peer":
-            return self._build_resolved_peer_operations(parent_dict, changed_leafs, delete)
 
         if object_type == "rule":
             return self._build_firewall_rule_operations(parent_dict, changed_leafs, delete)
 
         if object_type == "class":
             return self._build_traffic_class_operations(parent_dict, changed_leafs, delete)
-
-        if object_type == "five-tuple":
-            return self._build_five_tuple_operations(parent_dict, changed_leafs, delete)
 
         logging.info("No forwarder mapping yet for object type=%s, changed_leafs=%s",
                      object_type, changed_leafs)
