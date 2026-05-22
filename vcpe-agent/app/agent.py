@@ -558,12 +558,52 @@ class Agent:
 
     def _build_traffic_class_operations(self, parent_dict, changed_leafs, delete=False):
         class_name = parent_dict.get("name")
+        five_tuple = parent_dict.get("five-tuple", {})
+    
+        if isinstance(changed_leafs, str):
+            changed_leafs = [changed_leafs]
+    
         if not class_name:
             logging.warning("Traffic class has no name")
             return []
-
-        logging.info("Traffic class %s changed; no direct forwarder operation because YANG class has match only and no OpenAPI action", class_name)
-        return []
+    
+        policy_id = f"traffic-class-{class_name}"
+        path_group_id = f"{class_name}-steering"
+    
+        if delete:
+            return [self._operation("DELETE", f"/api/v1/flow-policies/{policy_id}")]
+    
+        match = {}
+    
+        self._add_if_not_none(match, "src_prefix", five_tuple.get("src-prefix"))
+        self._add_if_not_none(match, "dst_prefix", five_tuple.get("dst-prefix"))
+    
+        protocol = five_tuple.get("l4-protocol")
+        if protocol and protocol != "any":
+            match["protocol"] = protocol
+    
+        src_ports = self._port_range(five_tuple.get("src-port"))
+        if src_ports:
+            match["src_ports"] = src_ports
+    
+        dst_ports = self._port_range(five_tuple.get("dst-port"))
+        if dst_ports:
+            match["dst_ports"] = dst_ports
+    
+        if not match:
+            logging.warning("Traffic class %s has no five-tuple match", class_name)
+            return []
+    
+        payload = {
+            "match": match,
+            "action": {
+                "type": "use_path_group",
+                "path_group_id": path_group_id
+            },
+            "description": f"Traffic class {class_name} steering policy"
+        }
+    
+        return [self._operation("PUT", f"/api/v1/flow-policies/{policy_id}", payload)]
 
     def _build_five_tuple_operations(self, parent_dict, changed_leafs, delete=False):
         traffic_class = self._find_class_for_five_tuple(parent_dict)
