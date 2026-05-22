@@ -561,20 +561,18 @@ class Agent:
         five_tuple = parent_dict.get("five-tuple", {})
     
         if isinstance(changed_leafs, str):
-            changed_leafs = [changed_leafs]
+            changed_leafs = [changed_leafs]                                                   # allows the function to accept either one leaf or a list of leaves
     
         if not class_name:
             logging.warning("Traffic class has no name")
             return []
     
         policy_id = f"traffic-class-{class_name}"
-        path_group_id = f"{class_name}-steering"
     
         if delete:
             return [self._operation("DELETE", f"/api/v1/flow-policies/{policy_id}")]
     
         match = {}
-    
         self._add_if_not_none(match, "src_prefix", five_tuple.get("src-prefix"))
         self._add_if_not_none(match, "dst_prefix", five_tuple.get("dst-prefix"))
     
@@ -596,15 +594,11 @@ class Agent:
     
         payload = {
             "match": match,
-            "action": {
-                "type": "use_path_group",
-                "path_group_id": path_group_id
-            },
-            "description": f"Traffic class {class_name} steering policy"
+            "description": f"Traffic class {class_name} classification policy"
         }
     
         return [self._operation("PUT", f"/api/v1/flow-policies/{policy_id}", payload)]
-
+        
     def _build_five_tuple_operations(self, parent_dict, changed_leafs, delete=False):
         traffic_class = self._find_class_for_five_tuple(parent_dict)
         if not traffic_class:
