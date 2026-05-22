@@ -362,62 +362,56 @@ class Agent:
 
     def _build_lan_link_operations(self, parent_dict, changed_leafs, delete=False):
         name = parent_dict.get("name")
-        bridge_id = parent_dict.get("bridge-name")
-        target_interface = bridge_name if bridge_name else name
+        bridge_id = parent_dict.get("bridge-name")                                           # YANG bridge-name is used as Forwarder bridge_id
+        target_interface = bridge_id if bridge_id else name
         member_interfaces = self._as_list(parent_dict.get("member-interface"))
         ipv4_prefix = parent_dict.get("ipv4-prefix")
         admin_enabled = self._bool_value(parent_dict.get("admin-enabled"))
         dhcp_server = parent_dict.get("dhcp-server", {})
-
+    
         if isinstance(changed_leafs, str):
-            changed_leafs = [changed_leafs]                                               #allows the function to accept either one leaf or a list of leaves
-
+            changed_leafs = [changed_leafs]                                                   # allows the function to accept either one leaf or a list of leaves
+    
         if not target_interface:
             logging.warning("LAN link has no interface name")
             return []
-
-        operations = []                                                                   #stores the forwarder operations generated for this object
-
+    
+        operations = []                                                                       # stores the forwarder operations generated for this object
+    
         if delete:
             if bridge_id:
                 operations.append(self._operation("DELETE", f"/api/v1/bridges/{bridge_id}"))
             else:
-                operations.append(self._operation("PUT", f"/api/v1/interfaces/{name}/state", {"state": "down"}))
+                operations.append(self._operation("PUT", f"/api/v1/interfaces/{target_interface}/state", {"state": "down"}))
             operations.append(self._operation("DELETE", f"/api/v1/services/dhcp/{target_interface}"))
             return operations
-
-        if bridge_id and self._has_change(changed_leafs, "name", "bridge-id", "admin-enabled"):
-            bridge_payload = {"bridge_id": id}                                                                # OpenAPI bridge payload requires bridge_id
+    
+        if bridge_id and self._has_change(changed_leafs, "name", "bridge-name", "admin-enabled"):
+            bridge_payload = {"bridge_id": bridge_id}                                        # OpenAPI bridge payload requires bridge_id
             if self._has_change(changed_leafs, "admin-enabled") and admin_enabled is not None:
                 bridge_payload["admin_state"] = "up" if admin_enabled else "down"
-
-            operations.append(self._operation("PUT", f"/api/v1/bridges/{bridge_name}", bridge_payload))
-
+    
+            operations.append(self._operation("PUT", f"/api/v1/bridges/{bridge_id}", bridge_payload))
+    
         if bridge_id and self._has_change(changed_leafs, "member-interface"):
             operations.append(
                 self._operation("PUT", f"/api/v1/bridges/{bridge_id}/members",
                                 {"interfaces": member_interfaces}))
-
+    
             for member in member_interfaces:
                 operations.append(self._operation("PUT", f"/api/v1/interfaces/{member}/state", {"state": "up"}))
-
-            operations.append(self._operation("PUT", f"/api/v1/bridges/{bridge_id}", bridge_payload))
-
-            if self._has_change(changed_leafs, "member-interface"):
-                for member in member_interfaces:
-                    operations.append(self._operation("PUT", f"/api/v1/interfaces/{member}/state", {"state": "up"}))
-
+    
         if not bridge_id and self._has_change(changed_leafs, "admin-enabled") and admin_enabled is not None:
             operations.append(
                 self._operation("PUT", f"/api/v1/interfaces/{target_interface}/state",
                                 {"state": "up" if admin_enabled else "down"}))
-
-        if self._has_change(changed_leafs, "ipv4-prefix", "bridge-id"):
+    
+        if self._has_change(changed_leafs, "ipv4-prefix", "bridge-name"):
             operations.append(
                 self._operation("PUT", f"/api/v1/interfaces/{target_interface}/addresses",
                                 {"addresses": [ipv4_prefix] if ipv4_prefix else []}))
-
-        if self._has_change(changed_leafs, "enabled", "pool-start", "pool-end", "dns-server", "lease-time-seconds", "ipv4-prefix", "bridge-id"):
+    
+        if self._has_change(changed_leafs, "enabled", "pool-start", "pool-end", "dns-server", "lease-time-seconds", "ipv4-prefix", "bridge-name"):
             dhcp_enabled = self._bool_value(dhcp_server.get("enabled"))
             dhcp_payload = {
                 "enabled": dhcp_enabled,
@@ -430,12 +424,12 @@ class Agent:
             if dns_servers:
                 dhcp_payload["dns_servers"] = dns_servers
             self._add_if_not_none(dhcp_payload, "lease_time", self._lease_time(dhcp_server.get("lease-time-seconds")))
-
+    
             if dhcp_enabled is False:
                 operations.append(self._operation("DELETE", f"/api/v1/services/dhcp/{target_interface}"))
             elif dhcp_enabled is True:
                 operations.append(self._operation("PUT", f"/api/v1/services/dhcp/{target_interface}", dhcp_payload))
-
+    
         return operations
 
     def _build_dhcp_server_operations(self, parent_dict, changed_leafs, delete=False):
