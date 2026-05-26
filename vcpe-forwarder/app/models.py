@@ -292,8 +292,9 @@ class RenderPhase(ForwarderModel):
 
 
 class RenderPlan(ForwarderModel):
+    revision: str = "rev-0000"
     generated_at: str = Field(default_factory=utc_now)
-    phases: list[RenderPhase] = Field(default_factory=list)
+    phases: dict[str, list[str]] = Field(default_factory=dict)
     files: dict[str, str] = Field(default_factory=dict)
     metadata: dict[str, Any] = Field(default_factory=dict)
 
