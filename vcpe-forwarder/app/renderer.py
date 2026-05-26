@@ -219,11 +219,13 @@ class Renderer:
 
     def _render_nftables(self, current: ForwarderState, revision: str, plan: RenderPlan) -> list[str]:
         nft_path = f"var/lib/forwarder/rendered/{revision}/nftables/forwarder.nft"
+        nft_abs_path = self.root / nft_path
+
         plan.files[nft_path] = self._nftables_ruleset(current)
 
         return [
-            "nft list table inet forwarder >/dev/null 2>&1 || nft add table inet forwarder",
-            f"nft -f {nft_path}",
+            "nft delete table inet forwarder >/dev/null 2>&1 || true",
+            f"nft -f {nft_abs_path}",
         ]
 
     def _render_services(self, previous: ForwarderState, current: ForwarderState, revision: str, plan: RenderPlan) -> list[str]:
@@ -313,7 +315,6 @@ class Renderer:
 
     def _nftables_ruleset(self, current: ForwarderState) -> str:
         lines = [
-            "flush table inet forwarder",
             "table inet forwarder {",
             "  chain prerouting {",
             "    type filter hook prerouting priority mangle; policy accept;",
