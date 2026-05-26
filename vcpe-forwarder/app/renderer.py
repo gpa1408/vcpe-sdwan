@@ -138,16 +138,27 @@ class Renderer:
 
     def _render_interfaces(self, current: ForwarderState) -> list[str]:
         commands: list[str] = []
+
         for name, interface in sorted(current.interfaces.items()):
             if interface.kind not in {"bridge", "wireguard"}:
                 commands.append(f"ip link set dev {name} {interface.admin_state}")
+
             if interface.kind != "wireguard" and interface.mtu:
                 commands.append(f"ip link set mtu {interface.mtu} dev {name}")
+
             if interface.kind == "wireguard":
                 continue
+
+            # Important:
+            # "ip address replace X dev IFACE" only replaces X if X already exists.
+            # It does not remove previous addresses from the interface.
+            # To make kernel state match forwarder intended state, flush first.
+            commands.append(f"ip address flush dev {name}")
+
             for address in interface.addresses:
                 family_flag = "-6 " if ":" in address else ""
-                commands.append(f"ip {family_flag}address replace {address} dev {name}")
+                commands.append(f"ip {family_flag}address add {address} dev {name}")
+
         return commands
 
     def _render_tunnels(self, previous: ForwarderState, current: ForwarderState, revision: str, plan: RenderPlan) -> list[str]:
@@ -209,7 +220,11 @@ class Renderer:
     def _render_nftables(self, current: ForwarderState, revision: str, plan: RenderPlan) -> list[str]:
         nft_path = f"var/lib/forwarder/rendered/{revision}/nftables/forwarder.nft"
         plan.files[nft_path] = self._nftables_ruleset(current)
-        return [f"nft -f {nft_path}"]
+
+        return [
+            "nft list table inet forwarder >/dev/null 2>&1 || nft add table inet forwarder",
+            f"nft -f {nft_path}",
+        ]
 
     def _render_services(self, previous: ForwarderState, current: ForwarderState, revision: str, plan: RenderPlan) -> list[str]:
         commands: list[str] = []
