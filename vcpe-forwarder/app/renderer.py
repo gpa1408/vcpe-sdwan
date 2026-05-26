@@ -220,10 +220,15 @@ class Renderer:
     def _render_nftables(self, current: ForwarderState, revision: str, plan: RenderPlan) -> list[str]:
         nft_path = f"var/lib/forwarder/rendered/{revision}/nftables/forwarder.nft"
         nft_abs_path = self.root / nft_path
+        nft_abs_dir = nft_abs_path.parent
+        ruleset = self._nftables_ruleset(current)
 
-        plan.files[nft_path] = self._nftables_ruleset(current)
+        # Keep the rendered file in the render plan for audit/debug.
+        plan.files[nft_path] = ruleset
 
         return [
+            f"mkdir -p {nft_abs_dir}",
+            f"cat > {nft_abs_path} <<'NFT_EOF'\n{ruleset}\nNFT_EOF",
             "nft delete table inet forwarder >/dev/null 2>&1 || true",
             f"nft -f {nft_abs_path}",
         ]
