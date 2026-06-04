@@ -944,10 +944,10 @@ class Agent:
             traffic_class = decision.get("traffic-class")
             action = decision.get("action")
 
-            fwmark = self._get_fwmark_for_class(traffic_class)
-
             if not traffic_class:
                 continue
+
+             fwmark = self._get_fwmark_for_class(traffic_class)
 
             if action == "set-active-path":
                 payload = {
