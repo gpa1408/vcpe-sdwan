@@ -7,6 +7,8 @@ services:
     container_name: vcpe-forwarder
     restart: unless-stopped
 
+    network_mode: host
+
     cap_add:
       - NET_ADMIN
       - NET_RAW
@@ -25,9 +27,6 @@ services:
       - vcpe_forwarder_state:/state
 
 
-    networks:
-      - mgmt
-
 
   # vCPE Agent (control-plane logic)
   # External controller calls the agent (announce, keepalive/)
@@ -40,7 +39,7 @@ services:
     environment:
       - API_BIND=0.0.0.0
       - API_PORT=8080
-      - FORWARDER_URL=http://vcpe-forwarder:9090
+      - FORWARDER_URL=http://host.docker.internal:9090
 
       # If agent also calls SBI/Clixon internally (local service)
       - SBI_URL=http://127.0.0.1:8383 
@@ -55,6 +54,9 @@ services:
 
       # Controller URL for outbound calls (if you do both push+pull)
       - CONTROLLER_URL=http://${CONTROLLER_IP}:8080
+
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
 
     depends_on:
       - vcpe-forwarder
