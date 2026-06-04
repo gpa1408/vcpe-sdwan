@@ -37,6 +37,25 @@ class Agent:
     def _allocate_fwmark(self, class_name, index):                                    # called by "_make_steering_decisions()". CPE agent assigned fwmark for a traffic class.
         return 1000 + index
 
+    def _get_fwmark_for_class(self, class_name):
+        current_config = self.config_reader.get_intended_config()
+        classes = self._as_list(current_config.get("traffic", {}).get("class", []))
+    
+        class_names = []
+        for item in classes:
+            name = item.get("name")
+            if name:
+                class_names.append(name)
+    
+        class_names = sorted(class_names)
+    
+        if class_name not in class_names:
+            class_names.append(class_name)
+            class_names = sorted(class_names)
+    
+        index = class_names.index(class_name)
+        return self._allocate_fwmark(class_name, index)
+
     def _index_states_by_name(self, states):                                          # called by "_make_steering_decisions()"
         indexed = {}
         for item in states:                                                           # Loops through each state item in the list
@@ -543,9 +562,12 @@ class Agent:
         if not match:
             logging.warning("Traffic class %s has no five-tuple match", class_name)
             return []
+
+        fwmark = self._get_fwmark_for_class(class_name)
     
         payload = {
             "match": match,
+            "fwmark": fwmark,
             "description": f"Traffic class {class_name} classification policy"
         }
     
@@ -925,9 +947,11 @@ class Agent:
             if not traffic_class:
                 continue
 
+             fwmark = self._get_fwmark_for_class(traffic_class)
+
             if action == "set-active-path":
                 payload = {
-                    "traffic_class": traffic_class,
+                    "fwmark": fwmark,
                     "selected_path": decision.get("selected-path"),
                     "selected_path_type": decision.get("selected-path-type"),
                     "decision_status": decision.get("decision-status"),
@@ -945,7 +969,7 @@ class Agent:
 
             elif action == "set-load-balance-policy":
                 payload = {
-                    "traffic_class": traffic_class,
+                    "fwmark": fwmark,
                     "eligible_paths": decision.get("eligible-paths", []),
                     "selected_path_type": decision.get("selected-path-type"),
                     "decision_status": decision.get("decision-status"),
