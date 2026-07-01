@@ -28,15 +28,13 @@ class Agent:
         #self.monitoring_manager = MonitoringManager()    #REMOVE COMMENT
 
         self.generated_tunnel_keys = {}                                               # stores generated WireGuard keys during the current agent runtime
+        self.flow_id_fwmarks = {}                                                     # stores generated fwmark to use for monitoring flow id
         self.forwarder_base_url = "http://host.docker.internal:9090"                  # fixed forwarder API URL used by the agent
         self.forwarder_dry_run = False                                                # Since forwarder is not ready yet,a dry-run will be enabled by default (false send real API calls)
 
     # =====================================================================================
     # Basic helpers
     # =====================================================================================
-    def _allocate_fwmark(self, class_name, index):                                    # called by "_make_steering_decisions()". CPE agent assigned fwmark for a traffic class.
-        return 1000 + index
-
     def _index_states_by_name(self, states):                                          # called by "_make_steering_decisions()"
         indexed = {}
         for item in states:                                                           # Loops through each state item in the list
@@ -194,13 +192,21 @@ class Agent:
                 for _ in range(5):                                                       # small polling loop for the asynchronous NAT discovery task
                     result = requests.get(result_url, headers={"Accept": "application/json"}, timeout=10)
                     result.raise_for_status()
-                    data = result.json()
-                    if data.get("status") == "completed":
-                        nat_type = data.get("results", {}).get("nat_type")              # reads nat_type value returned by the forwarder
-                        break
-                    if data.get("status") == "failed":
-                        return None
-                    time.sleep(1)
+                    data = result.json()                                                 # parse response body                 
+                
+                    status = data.get("status")                                         
+                
+                    if status == "completed":                                            
+                        nat_type = data.get("results", {}).get("nat_type")             
+                        break                                                            # stop polling
+                
+                    if status == "failed":                                              
+                        logging.warning("NAT discovery failed for wan-link=%s", wan_name) 
+                        return None                                                      # stop NAT discovery
+                
+                    if status == "running":                                              # NAT discovery is still not finished
+                        time.sleep(1)                                                    # wait before next polling attempt
+                        continue                                                         # poll again
 
                 if not nat_type:
                     return None
@@ -238,19 +244,72 @@ class Agent:
         return False
 
     def run_steering_loop_after_restconf_ready(self, interval_sec=10):
-        if not self.wait_for_restconf():
-            return
-
+        if not self.wait_for_restconf():                                                # wait until Clixon RESTCONF is ready
+            return                                                                      # stop startup if RESTCONF is not ready
+        self._sync_fwmarks_from_forwarder()                                             # recover existing fwmarks from forwarder after router/agent reboot (only once)
         self.run_forever(interval_sec=interval_sec)
     # =====================================================================================
     # Forwarder API helpers
     # =====================================================================================
     def _operation(self, method, path, payload=None):
-        operation = {"method": method, "path": path}                                   # basic forwarder operation structure
+        operation = {"method": method, "path": path}                                     # basic forwarder operation structure
         if payload is not None:
             operation["payload"] = payload                                               # payload is added only when the operation needs data
         return operation
 
+    def _store_forwarder_fwmark(self, traffic_class, fwmark):
+        if not traffic_class or fwmark is None:                                          # do nothing if required values are missing
+            return
+    
+        self.flow_id_fwmarks[traffic_class] = int(fwmark)                                # store fwmark learned from forwarder for monitoring use
+        logging.info("Learned fwmark=%s for traffic_class=%s from forwarder", fwmark, traffic_class) # log learned fwmark
+
+
+    def _process_forwarder_transaction_result(self, result):
+        if not isinstance(result, dict):                                                  # ignore unexpected response format
+            return
+    
+        for operation_result in result.get("results", []):                                # loop through each operation result returned by forwarder
+            path = operation_result.get("path", "")                                    
+            fwmark = operation_result.get("fwmark")                                    
+    
+            if not path.startswith("/api/v1/flow-policies/traffic-class-"):               # only flow-policy responses are expected to contain fwmark
+                continue
+     
+            traffic_class = path.rsplit("traffic-class-", 1)[-1]                          # extract traffic class name from flow policy path
+            self._store_forwarder_fwmark(traffic_class, fwmark)                           # store returned fwmark in runtime cache
+
+    def _sync_fwmarks_from_forwarder(self):
+        if self.forwarder_dry_run:                                                        # skip GET requests when forwarder API calls are disabled
+            logging.info("Dry-run: skipping fwmark sync from forwarder")                  # log why startup fwmark sync is skipped
+            return                                                                        # stop here in dry-run mode
+    
+        try:                                                                              # try to recover fwmarks from forwarder after reboot/restart
+            current_config = self.config_reader.get_intended_config()                     # read current intended config from Clixon datastore
+            classes = self._as_list(current_config.get("traffic", {}).get("class", []))   # read configured traffic classes from YANG datastore
+    
+            for traffic_class_obj in classes:                                             # loop through each configured traffic class
+                class_name = traffic_class_obj.get("name")                                # read traffic class name from datastore
+    
+                if not class_name:                                                        # skip invalid traffic class entry
+                    continue                                                              # continue with next class
+    
+                policy_id = f"traffic-class-{class_name}"                                 # build forwarder flow-policy ID from traffic class name
+                url = f"{self.forwarder_base_url}/api/v1/flow-policies/{policy_id}"       # request stored fwmark for this flow-policy from forwarder
+    
+                response = requests.get(url, headers={"Accept": "application/json"}, timeout=10) # send GET request to forwarder
+                response.raise_for_status()                                               # raise exception if forwarder returns 4xx or 5xx
+    
+                data = response.json()                                                    # parse JSON response from forwarder
+                fwmark = data.get("fwmark")                                               # read fwmark assigned and stored by forwarder
+    
+                self._store_forwarder_fwmark(class_name, fwmark)                          # store fwmark in agent runtime cache for monitoring
+    
+            logging.info("Synced fwmarks from forwarder: %s", self.flow_id_fwmarks)       # log final fwmark cache after startup sync
+    
+        except Exception as e:                                                            # catch connection, timeout, JSON, or response errors
+            logging.exception("Failed to sync fwmarks from forwarder: %s", e)             
+            
     def _send_forwarder_transaction(self, operations, validate_only):
         payload = {
             "validate_only": validate_only,                                              # "True" during Clixon validate phase, "False" during commit phase. Detection happens in happens in handle_clixon_transaction()
@@ -266,13 +325,17 @@ class Agent:
                 "payload": payload}
 
         url = f"{self.forwarder_base_url}/api/v1/transactions"
-        response = requests.post(url, json=payload, timeout=10)                           #send the transaction to the forwarder API
+        response = requests.post(url, json=payload, timeout=10)                            #send the transaction to the forwarder API
         response.raise_for_status()
 
-        if response.text:
-            return response.json()
-
-        return {"status": "ok"}
+        logging.info("Forwarder response body: %s", response.text)                         # log actual response body for debugging
+        
+        if response.text:                                                                  # if forwarder returned JSON response body
+            result = response.json()                                                       # parse response JSON
+            self._process_forwarder_transaction_result(result)                             # extract fwmark values returned by forwarder
+            return result                                                                  # return forwarder response to caller
+        
+        return {"status": "ok"}                                                            # return simple OK if response body is empty
 
     # =====================================================================================
     # Build forwarder operations (for Clixon YANG Datastore config-diff triggered operations)
