@@ -690,6 +690,13 @@ class Agent:
                         or policy.get("load-balance-link-type") == "wan-link"             # true if load-balance policy uses WAN links
                     )
 
+                    if not uses_wan_link:
+                        logging.info(
+                            "Skipping flow monitoring for class=%s because it uses tunnel steering",
+                            class_name
+                        )
+                        return
+
                     flow_id = self.flow_id_fwmarks.get(class_name)                        # get real fwmark from forwarder result
 
                     if flow_id is None:                                                   # if forwarder/fwmark is not available during dry-run
@@ -826,7 +833,7 @@ class Agent:
                         "parent_dict": parent_dict,
                         "changed_leafs": []}
 
-        changed_objects[object_key]["changed_leafs"].append(changed_leaf)                    # stores all changed leafs for this object
+                changed_objects[object_key]["changed_leafs"].append(changed_leaf)                    # stores all changed leafs for this object
 
         for item in changed_objects.values():                                                # after grouping, build operations once per changed object
             object_type = item["object_type"]
