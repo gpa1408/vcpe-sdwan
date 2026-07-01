@@ -16,21 +16,21 @@ from cryptography.hazmat.primitives import serialization
 from config_reader import ConfigReader
 #from metric_reader import MetricReader                  #REMOVE COMMENT
 #from state_writer import StateWriter                    #REMOVE COMMENT
-#from monitoring_manager import MonitoringManager        #REMOVE COMMENT
+from monitoring_manager import MonitoringManager        
 
 logging.basicConfig(level=logging.INFO)                                               # to show info messages and errors
 
 class Agent:
     def __init__(self):
         self.config_reader = ConfigReader()
+        self.monitoring_manager = MonitoringManager(dry_run=True)    
         #self.metric_reader = MetricReader()              #REMOVE COMMENT
         #self.state_writer = StateWriter()                #REMOVE COMMENT
-        #self.monitoring_manager = MonitoringManager()    #REMOVE COMMENT
-
+        
         self.generated_tunnel_keys = {}                                               # stores generated WireGuard keys during the current agent runtime
         self.flow_id_fwmarks = {}                                                     # stores generated fwmark to use for monitoring flow id
         self.forwarder_base_url = "http://host.docker.internal:9090"                  # fixed forwarder API URL used by the agent
-        self.forwarder_dry_run = False                                                # Since forwarder is not ready yet,a dry-run will be enabled by default (false send real API calls)
+        self.forwarder_dry_run = False                                                # If forwarder is not ready yet,a dry-run "true" (false send real API calls)
 
     # =====================================================================================
     # Basic helpers
@@ -663,16 +663,120 @@ class Agent:
         return self._build_operations_from_object(object_type, parent_dict, changed_leafs, delete)
 
     # =====================================================================================
+    # Monitoring manager helper
+    # =====================================================================================
+    def _start_monitoring_for_object(self, object_type, parent_dict):                     # called after Clixon commit to start/update monitoring
+        if not hasattr(self, "monitoring_manager"):                                       # check whether MonitoringManager is enabled
+            logging.warning("monitoring_manager not configured")                         
+            return                                                                       
+
+        try:                                                                           
+            if object_type == "class":                                                    # traffic class object changed
+                class_name = parent_dict.get("name")                                    
+
+                if not class_name:                                                       
+                    logging.warning("Cannot start monitoring: traffic class has no name")  
+                    return                                                                # stop this monitoring action
+
+                current_config = self.config_reader.get_intended_config()                 # read full current YANG datastore config
+                policies = current_config.get("policy", {}).get("steering", [])           
+
+                for policy in self._as_list(policies):                                    # loop through steering policies and skip policies for other traffic classes
+                    if policy.get("class") != class_name:                                 
+                        continue                                                          
+
+                    uses_wan_link = (                                                     # check whether this traffic class uses underlay WAN links
+                        policy.get("failover-link-type") == "wan-link"                    # true if failover policy uses WAN links
+                        or policy.get("load-balance-link-type") == "wan-link"             # true if load-balance policy uses WAN links
+                    )
+
+                    flow_id = self.flow_id_fwmarks.get(class_name)                        # get real fwmark from forwarder result
+
+                    if flow_id is None:                                                   # if forwarder/fwmark is not available during dry-run
+                        flow_id = f"test-{class_name}"                                    # use fake flow_id only for dry-run testing
+
+                    payload = self.monitoring_manager.start_underlay_flow_monitoring(      # call monitoring manager for underlay flow monitoring
+                        traffic_class=parent_dict,                                         # traffic class contains five-tuple
+                        steering_policy=policy,                                            # steering policy contains SLO values
+                        flow_id=flow_id                                                    # flow_id is fwmark in final logic
+                    )
+
+                    logging.info(                                                          # log successful dry-run/real monitoring request
+                        "Started underlay monitoring for class=%s payload=%s",
+                        class_name,
+                        payload
+                    )
+                    return                                                                # stop after matching policy is processed
+
+                logging.info("Skipping monitoring for class=%s because no steering policy exists", class_name) # no policy found for class
+
+            elif object_type == "tunnel":                                                  # tunnel object changed
+                payload = self.monitoring_manager.start_overlay_tunnel_monitoring(parent_dict) # call monitoring manager for overlay tunnel monitoring
+                logging.info("Started overlay tunnel monitoring payload=%s", payload)       # log successful tunnel monitoring request
+
+        except Exception as e:                                                             # catch any monitoring-related error
+            logging.exception(                                                             # log full exception without crashing callback server
+                "Failed to start monitoring for object_type=%s object=%s: %s",
+                object_type,
+                parent_dict, e  )    
+            
+    def _stop_monitoring_for_object(self, object_type, parent_dict):                      # called after Clixon commit to stop monitoring
+        if not hasattr(self, "monitoring_manager"):                                       # check whether MonitoringManager is enabled
+            logging.warning("monitoring_manager not configured")                          # log warning if not enabled
+            return                                                                        # stop without failing agent
+
+        try:                                                                              # protect Clixon callback from monitoring errors
+            if object_type == "class":                                                    # traffic class deleted
+                class_name = parent_dict.get("name")                                      # read traffic class name
+
+                if not class_name:                                                        # class name is required
+                    logging.warning("Cannot stop monitoring: traffic class has no name")   # log missing name
+                    return                                                                # stop this monitoring action
+
+                flow_id = self.flow_id_fwmarks.get(class_name)                            # get real fwmark/flow_id if available
+
+                if flow_id is None:                                                       # if unavailable during dry-run
+                    flow_id = f"test-{class_name}"                                        # use same fake flow_id format used during start
+
+                self.monitoring_manager.stop_underlay_flow_monitoring(flow_id)             # call monitoring manager to stop underlay flow monitoring
+                self.flow_id_fwmarks.pop(class_name, None)                                # remove cached fwmark if present
+
+                logging.info(                                                             # log successful stop
+                    "Stopped underlay monitoring for class=%s flow_id=%s",
+                    class_name,
+                    flow_id
+                )
+
+            elif object_type == "tunnel":                                                  # tunnel deleted
+                tunnel_id = parent_dict.get("name")                                       # YANG tunnel name is tunnel_id
+
+                if not tunnel_id:                                                         # tunnel name is required
+                    logging.warning("Cannot stop monitoring: tunnel has no name")          # log missing tunnel name
+                    return                                                                # stop this monitoring action
+
+                self.monitoring_manager.stop_overlay_tunnel_monitoring(tunnel_id)          # call monitoring manager to stop tunnel monitoring
+                logging.info("Stopped overlay monitoring for tunnel_id=%s", tunnel_id)     # log successful stop
+
+        except Exception as e:                                                             # catch any monitoring-related error
+            logging.exception(                                                             # log full exception without crashing callback server
+                "Failed to stop monitoring for object_type=%s object=%s: %s",
+                object_type,
+                parent_dict,
+                e
+            )
+
+    
+    # =====================================================================================
     # Clixon callback handling
     # =====================================================================================
     def handle_clixon_transaction(self, xml_body):
-        root = ET.fromstring(xml_body)                                                    #parses the XML transaction body received from Clixon
+        root = ET.fromstring(xml_body)                                                            #parses the XML transaction body received from Clixon
 
         phase = root.findtext("phase")
         transaction_id = root.findtext("transaction-id")
-        validate_only = phase == "validate"                                               #Clixon sends validate first and commit after successful validation. If Clixon sends phase = "validate"→ validate_only = True
+        validate_only = phase == "validate"                                                       #Clixon sends validate first and commit after successful validation. If Clixon sends phase = "validate"→ validate_only = True
 
-        if transaction_id == "0":                                                         #transaction 0 is startup data, not a real user config change
+        if transaction_id == "0":                                                                 #transaction 0 is startup data, not a real user config change
             logging.info("Ignoring Clixon startup transaction 0")
             return {
                 "status": "ok",
@@ -683,26 +787,30 @@ class Agent:
         if phase not in ["validate", "commit"]:
             raise ValueError(f"Unsupported Clixon phase: {phase}")
 
-        operations = []                                                                    #stores the forwarder operations generated for this object
+        operations = []                                                                            #stores the forwarder operations generated for this object
         changed_objects = {}
         nat_detection_candidates = []
 
-        changed = root.find("changed")                                                    #contains leaf changes sent by the Clixon diff callback
+        monitoring_start_candidates = []                                                          # class/tunnel objects that need monitoring start/update after commit
+        monitoring_stop_candidates = []                                                           # class/tunnel objects that need monitoring stop after commit
+
+        changed = root.find("changed")                                                            #contains leaf changes sent by the Clixon diff callback
+        
         if changed is not None:
             for change in changed.findall("change"):
                 new_node = change.find("new")
                 if new_node is None:
                     continue
 
-                changed_leaf = new_node.findtext("node-name")                              #name of the YANG leaf that changed
-                parent_data = new_node.find("parent-data")                                 #contains the full parent object of the changed leaf
-                parent_xml = self._first_child(parent_data)                                 #extracts the real changed object from parent-data
+                changed_leaf = new_node.findtext("node-name")                                   #name of the YANG leaf that changed
+                parent_data = new_node.find("parent-data")                                      #contains the full parent object of the changed leaf
+                parent_xml = self._first_child(parent_data)                                     #extracts the real changed object from parent-data
 
                 if parent_xml is None:
                     continue
 
-                object_type = self._local_name(parent_xml.tag)                              #example: wan-link, tunnel, rule, class
-                parent_dict = self._xml_to_dict(parent_xml)                                 #converted parent object used by the operation builders
+                object_type = self._local_name(parent_xml.tag)                                 #example: wan-link, tunnel, rule, class
+                parent_dict = self._xml_to_dict(parent_xml)                                    #converted parent object used by the operation builders
 
                 object_name = (
                     parent_dict.get("name")
@@ -710,7 +818,7 @@ class Agent:
                     or parent_dict.get("class")
                     or object_type)
 
-                object_key = f"{object_type}:{object_name}"                                #unique key used to group multiple changed leafs under same object
+                object_key = f"{object_type}:{object_name}"                                    # unique key used to group multiple changed leafs under same object
 
                 if object_key not in changed_objects:
                     changed_objects[object_key] = {
@@ -718,9 +826,9 @@ class Agent:
                         "parent_dict": parent_dict,
                         "changed_leafs": []}
 
-                changed_objects[object_key]["changed_leafs"].append(changed_leaf)           #stores all changed leafs for this object
+        changed_objects[object_key]["changed_leafs"].append(changed_leaf)                    # stores all changed leafs for this object
 
-        for item in changed_objects.values():                                               #after grouping, build operations once per changed object
+        for item in changed_objects.values():                                                # after grouping, build operations once per changed object
             object_type = item["object_type"]
             parent_dict = item["parent_dict"]
             changed_leafs = item["changed_leafs"]
@@ -731,8 +839,14 @@ class Agent:
                     parent_dict,
                     changed_leafs,
                     delete=False))
+            
+            if object_type in ["class", "tunnel"]:                                     
+                monitoring_start_candidates.append({                                         # if traffic class or tunnel changed, schedule monitoring start/update
+                    "object_type": object_type,                                        
+                    "parent_dict": parent_dict                                               # object data
+                })
 
-            if object_type == "wan-link":                                                  #WAN changes may require NAT detection after commit
+            if object_type == "wan-link":                                                    # WAN changes may require NAT detection after commit
                 if self._has_change(
                     changed_leafs,
                     "interface-name",
@@ -754,6 +868,16 @@ class Agent:
                         parent_xml,
                         ["*"],
                         delete=False))
+                
+                if parent_xml is not None:                                                 # if added object exists
+                    object_type = self._local_name(parent_xml.tag)                         
+                    parent_dict = self._xml_to_dict(parent_xml)                            # convert XML to dict
+
+                    if object_type in ["class", "tunnel"]:                                 
+                        monitoring_start_candidates.append({                               # schedule monitoring start
+                            "object_type": object_type,                               
+                            "parent_dict": parent_dict                                     # object data
+                        })
 
         deleted = root.find("deleted")                                                      # contains deleted datastore objects (normally delete=False, but when clixon reports delete->delete=True)
         if deleted is not None:
@@ -766,6 +890,16 @@ class Agent:
                         deleted_xml,
                         ["*"],
                         delete=True))
+                
+                if deleted_xml is not None:                                                # if deleted object exists
+                    object_type = self._local_name(deleted_xml.tag)                    
+                    parent_dict = self._xml_to_dict(deleted_xml)                           # convert XML to dict (Clixon sends the changed object as XML)
+
+                    if object_type in ["class", "tunnel"]:                                 # only stop monitoring for classes and tunnels
+                        monitoring_stop_candidates.append({                                # schedule monitoring stop
+                            "object_type": object_type,                                
+                            "parent_dict": parent_dict                                
+                        })
 
         if not operations:                                                                  #if this config change has no forwarder mapping, return OK without sending anything
             return {
@@ -778,12 +912,24 @@ class Agent:
             operations=operations,
             validate_only=validate_only)
 
-        if phase == "commit":                                                              #NAT detection is triggered only after the config is committed
+        if phase == "commit":                                                              # NAT detection is triggered only after the config is committed
             for wan in nat_detection_candidates:
                 self.detect_and_store_nat_type(
                     wan.get("name"),
                     wan.get("interface-name"),
                     wan.get("role"))
+
+            for item in monitoring_start_candidates:                                        # start/update monitoring only after real commit
+                self._start_monitoring_for_object(                              
+                    item["object_type"],                                                    # class or tunnel
+                    item["parent_dict"]                                                     # object data
+                )
+
+            for item in monitoring_stop_candidates:                                        # stop monitoring only after real commit
+                self._stop_monitoring_for_object(                                      
+                    item["object_type"],                                                    # class or tunnel
+                    item["parent_dict"]                                                     # object data
+                )
 
         return {
             "status": "ok",
