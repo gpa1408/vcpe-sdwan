@@ -12,15 +12,16 @@ class MetricReader:
         self.influx_url = os.environ["INFLUX_URL"]             
         self.influx_token = os.environ["INFLUX_TOKEN"]         
         self.influx_org = os.environ["INFLUX_ORG"]              
-        self.influx_bucket = os.environ["INFLUX_BUCKET"]                 
+        self.influx_bucket = os.environ["INFLUX_BUCKET"]     
+
+        self.reader_mode = os.getenv("METRIC_READER_MODE", "influxdb")                         # use "fake" for dry run, "influxdb" for real InfluxDB
 
         self.stale_after_sec = int(os.getenv("METRIC_STALE_AFTER_SEC", "15"))                  # metric older than this becomes stale (15 sec)
 
         self.client = InfluxDBClient(                                                          # create InfluxDB client
             url=self.influx_url,                                                      
             token=self.influx_token,                                                   
-            org=self.influx_org                                            
-        )
+            org=self.influx_org)
 
         self.query_api = self.client.query_api()                                               # object used to run Flux queries
 
@@ -36,8 +37,7 @@ class MetricReader:
             "timestamp": None,                                                      
             "stale": True,                                                             
             "source": "influxdb",                                                     
-            "reason": reason                                                          
-        }
+            "reason": reason}
 
     # =====================================================================================
     # Metric object expected by agent.py
@@ -63,7 +63,46 @@ class MetricReader:
             "stale": stale,                                                                         # True if metric is too old
             "source": "influxdb",
         }
+    # =====================================================================================
+    # Return fake metric for dry-run testing without InfluxDB
+    # =====================================================================================
+    def _get_fake_metric(self, metric_id):
+        now = datetime.now(timezone.utc)                                                       # create current timestamp for fake metric
 
+        fake_metrics = {                                                                       # fake metric database for dry run
+            "1001": {                                                                          # fake flow_id/fwmark 1001
+                "latency_ms": 20,
+                "jitter_ms": 3,
+                "loss_percent": 0.1,
+                "available_bandwidth_kbps": 50000
+            },
+            "1002": {                                                                          # fake flow_id/fwmark 1002
+                "latency_ms": 80,
+                "jitter_ms": 15,
+                "loss_percent": 1.5,
+                "available_bandwidth_kbps": 15000
+            },
+            "wg01": {                                                                          # fake tunnel metric for wg01
+                "latency_ms": 25,
+                "jitter_ms": 4,
+                "loss_percent": 0.2,
+                "available_bandwidth_kbps": 60000
+            },
+            "wg02": {                                                                          # fake tunnel metric for wg02
+                "latency_ms": 120,
+                "jitter_ms": 25,
+                "loss_percent": 3.0,
+                "available_bandwidth_kbps": 8000
+            }
+        }
+
+        values = fake_metrics.get(str(metric_id))                                              # get fake metric by flow_id or tunnel_id
+
+        if values is None:                                                                     # if no fake metric exists for this id
+            return self._empty_metric(f"no fake metric found for {metric_id}")                  # return stale metric
+
+        return self._build_metric(values, now, reason="fake metric for dry run")                # return fake metric using same final format
+        
     # =====================================================================================
     # Generic function to read latest metric from InfluxDB
     # =====================================================================================
@@ -129,6 +168,9 @@ from(bucket: "{self.influx_bucket}")
     # Read overlay tunnel metric
     # =====================================================================================
     def get_tunnel_metric(self, name):
+        if self.reader_mode == "fake":                                                         # if dry-run mode is enabled
+            return self._get_fake_metric(name)                                                 # return fake tunnel metric instead of querying InfluxDB
+
         return self._get_latest_metric(                                               
             measurement="sdwan_tunnel_metrics",                                  
             tag_name="tunnel_id",                                                       
