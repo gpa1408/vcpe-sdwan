@@ -51,6 +51,7 @@ services:
       - INFLUX_BUCKET=vcpe
       - INFLUX_ORG=thesis
       - INFLUX_TOKEN=${INFLUX_TOKEN}
+      - METRIC_READER_MODE=fake                                                         # fake metrics until InfluxDB metric writing is ready
 
       # Controller URL for outbound calls (if you do both push+pull)
       - CONTROLLER_URL=http://${CONTROLLER_IP}:8080
