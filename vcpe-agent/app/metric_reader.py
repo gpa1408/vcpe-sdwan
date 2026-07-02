@@ -159,6 +159,9 @@ from(bucket: "{self.influx_bucket}")
     # Read underlay traffic-class metric using flow_id/fwmark
     # =====================================================================================
     def get_flow_metric(self, flow_id):
+        if self.reader_mode == "fake":                                                         # if dry-run mode is enabled
+            return self._get_fake_metric(flow_id)                                              # return fake flow metric instead of querying InfluxDB
+    
         return self._get_latest_metric(                                                
             measurement="sdwan_flow_metrics",                                           
             tag_name="flow_id",                                                      
