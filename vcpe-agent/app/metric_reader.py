@@ -38,12 +38,16 @@ class MetricReader:
             "source": "influxdb",                                                     
             "reason": reason                                                          
         }
+
     # =====================================================================================
     # Metric object expected by agent.py
     # =====================================================================================
     def _build_metric(self, values, timestamp, reason="metric read from influxdb"):
         if timestamp is None:                                                            
             return self._empty_metric("metric timestamp missing")                                   # if InfluxDB returned no timestamp, return stale metric
+
+        if timestamp.tzinfo is None:
+            timestamp = timestamp.replace(tzinfo=timezone.utc)
 
         now = datetime.now(timezone.utc)                                                            # get current time in UTC
 
@@ -57,13 +61,14 @@ class MetricReader:
             "available_bandwidth_kbps": values.get("available_bandwidth_kbps"),        
             "timestamp": timestamp.isoformat(),                                        
             "stale": stale,                                                                         # True if metric is too old
+            "source": "influxdb",
         }
 
     # =====================================================================================
     # Generic function to read latest metric from InfluxDB
     # =====================================================================================
     def _get_latest_metric(self, measurement, tag_name, tag_value):
-        if not tag_value:                                                                           # if flow_id/tunnel_id/name is missing, return stale metric
+        if tag_value is None or tag_value == "":                                                    # if flow_id/tunnel_id/name is missing, return stale metric
             return self._empty_metric(f"{tag_name} missing")                            
 
         flux = f'''                                                                                 # Flux query string starts here
@@ -80,7 +85,7 @@ from(bucket: "{self.influx_bucket}")
   |> last()                                                                                         # get latest value of each field
 '''
         try:
-            tables = self.query_api.query(flux, org=self.influx_org)                                # ends the Flux query to InfluxDB and returns query results as tables
+            tables = self.query_api.query(org=self.influx_org, query=flux)                          # ends the Flux query to InfluxDB and returns query results as tables
 
             values = {}                                                                             # stores returned metric values
             latest_timestamp = None                                                                 # stores the newest timestamp among all returned fields
@@ -127,7 +132,7 @@ from(bucket: "{self.influx_bucket}")
         return self._get_latest_metric(                                               
             measurement="sdwan_tunnel_metrics",                                  
             tag_name="tunnel_id",                                                       
-            tag_value=name)
+            tag_value=str(name))
 
     # =====================================================================================
     # Close InfluxDB client
