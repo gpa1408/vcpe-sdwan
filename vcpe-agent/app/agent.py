@@ -982,61 +982,78 @@ class Agent:
 
         return True                                                                        #If all checks pass, candidate satisfies the SLO
 
-    def _extract_candidate_states(self, policy, wan_state_map, tunnel_state_map):           #Return candidate type and candidate state objects according to policy.
-        steering_mode = policy.get("steering-mode")                                        #Reads steering mode from policy. Default is "failover"
-        candidates = []
-
+    def _metric_to_candidate_state(self, name, metric):                                     # Convert MetricReader output into steering candidate state format
+        metric = metric or {}                                                              # Protect against None from MetricReader
+    
+        return {
+            "name": name,                                                                  # WAN link name or tunnel name
+            "oper-status": "down" if metric.get("stale") else "up",                       # stale metric means candidate is down
+            "latency-ms": metric.get("latency_ms"),                                        # measured latency
+            "jitter-ms": metric.get("jitter_ms"),                                          # measured jitter
+            "loss-percent": metric.get("loss_percent"),                                    # measured packet loss
+            "available-bandwidth-kbps": metric.get("available_bandwidth_kbps"),            # measured available bandwidth
+            "metric-source": metric.get("source"),                                         # influxdb/fake
+            "metric-reason": metric.get("reason"),                                         # useful when stale
+            "metric-timestamp": metric.get("timestamp")                                    # metric timestamp
+        }
+    def _extract_candidate_states(self, policy, flow_state_map, tunnel_state_map):           # Build candidates using flow metrics for underlay and tunnel metrics for overlay
+        traffic_class = policy.get("class")                                                 # traffic class associated with this policy
+        steering_mode = policy.get("steering-mode")                                         # failover or load-balance
+        candidates = []                                                                     # final candidate list
+    
+        if not traffic_class:
+            return candidates                                                               # without class, flow metric cannot be selected
+    
         if steering_mode == "failover":
-            failover_link_type = policy.get("failover-link-type")                          #If mode is failover, read whether policy uses tunnels or WAN links.
-
-            if failover_link_type == "tunnel":
-                ordered_names = []
-                primary = policy.get("primary-tunnel")
-                if primary:
-                    ordered_names.append(primary)                                          #If a primary tunnel exists, add it first
-                ordered_names.extend(policy.get("secondary-tunnel", []))                   #Then append all secondary tunnels.
-
-                for name in ordered_names:
-                    state = tunnel_state_map.get(name)
-                    if state:
-                        candidates.append(("tunnel", name, state))                         #For each configured tunnel name, look up its state and add it as candidate.
-
-            elif failover_link_type == "wan-link":
-                ordered_names = []
+            failover_link_type = policy.get("failover-link-type")                           # wan-link or tunnel
+    
+            if failover_link_type == "wan-link":
+                ordered_names = []                                                          # candidate WAN links in policy order
                 primary = policy.get("primary-wan-link")
                 if primary:
-                    ordered_names.append(primary)                                          #If a primary wan link exists, add it first
-                ordered_names.extend(policy.get("secondary-wan-link", []))                 #Then append all secondary wan links
-
-                for name in ordered_names:
-                    state = wan_state_map.get(name)
+                    ordered_names.append(primary)
+                ordered_names.extend(self._as_list(policy.get("secondary-wan-link")))
+    
+                flow_state = flow_state_map.get(traffic_class)                              # one flow metric for this traffic class
+    
+                for wan_name in ordered_names:
+                    if flow_state:
+                        candidates.append(("wan-link", wan_name, flow_state))               # WAN path name, but SLO checked using class flow metric
+    
+            elif failover_link_type == "tunnel":
+                ordered_names = []                                                          # candidate tunnels in policy order
+                primary = policy.get("primary-tunnel")
+                if primary:
+                    ordered_names.append(primary)
+                ordered_names.extend(self._as_list(policy.get("secondary-tunnel")))
+    
+                for tunnel_name in ordered_names:
+                    state = tunnel_state_map.get(tunnel_name)                               # tunnel health metric
                     if state:
-                        candidates.append(("wan-link", name, state))                       #For each configured wan link, look up its state and add it as candidate
-
+                        candidates.append(("tunnel", tunnel_name, state))
+    
         elif steering_mode == "load-balance":
-            lb_type = policy.get("load-balance-link-type")                                 #If mode is load-balance, read whether balancing uses tunnels or WAN links.
-
-            if lb_type == "tunnel":
-                for name in policy.get("load-balance-tunnel", []):
-                    state = tunnel_state_map.get(name)
+            load_balance_link_type = policy.get("load-balance-link-type")                   # wan-link or tunnel
+    
+            if load_balance_link_type == "wan-link":
+                flow_state = flow_state_map.get(traffic_class)                              # one flow metric for this traffic class
+    
+                for wan_name in self._as_list(policy.get("load-balance-wan-link")):
+                    if flow_state:
+                        candidates.append(("wan-link", wan_name, flow_state))               # each WAN candidate uses this class flow metric
+    
+            elif load_balance_link_type == "tunnel":
+                for tunnel_name in self._as_list(policy.get("load-balance-tunnel")):
+                    state = tunnel_state_map.get(tunnel_name)                               # tunnel health metric
                     if state:
-                        candidates.append(("tunnel", name, state))                         #adds configured tunnels as load-balance candidates.
-
-            elif lb_type == "wan-link":
-                for name in policy.get("load-balance-wan-link", []):
-                    state = wan_state_map.get(name)
-                    if state:
-                        candidates.append(("wan-link", name, state))                       #adds configured WAN links as load-balance candidates
-
-        return candidates                                                                  #returns the final candidate list.
-
-    def _make_steering_decisions(self, current_config, wan_link_states, tunnel_states):
+                        candidates.append(("tunnel", tunnel_name, state))
+    
+        return candidates
+    
+    def _make_steering_decisions(self, current_config, flow_state_map, tunnel_state_map):
         decisions = []                                                                      #Creates an empty list for steering decisions.
 
-        steering_policies = current_config.get("policy", {}).get("steering", [])            #Reads steering policies from config.
-
-        wan_state_map = self._index_states_by_name(wan_link_states)                         #Converts state lists into dictionaries for fast lookup by name
-        tunnel_state_map = self._index_states_by_name(tunnel_states)                        #Converts state lists into dictionaries for fast lookup by name
+        steering_policies = current_config.get("policy", {}).get("steering", [])            #Reads steering policies from config.          
 
         for policy in steering_policies:                                                    #Loops through each steering policy.
             traffic_class = policy.get("class")                                             #Reads traffic class associated with this policy.
@@ -1044,7 +1061,7 @@ class Agent:
                 continue                                                                    #Skip if missing
 
             steering_mode = policy.get("steering-mode")                                     #Reads steering mode
-            candidates = self._extract_candidate_states(policy, wan_state_map, tunnel_state_map) #Builds the list of candidate paths according to this policy.
+            candidates = self._extract_candidate_states(policy, flow_state_map, tunnel_state_map) #Builds the list of candidate paths according to this policy.
 
             eligible = []                                                                   #Creates lists for accepted and rejected candidates
             rejected = []
@@ -1182,60 +1199,89 @@ class Agent:
     # Main cycle
     # =====================================================================================
     def run_once(self):
-        current_config = self.config_reader.get_intended_config()
-
+        current_config = self.config_reader.get_intended_config()                           # read intended config from YANG datastore
+    
         if not hasattr(self, "metric_reader"):
             logging.warning("metric_reader not configured")
             return {"status": "skipped", "reason": "metric_reader not configured"}
-
-        wan_links = current_config.get("interfaces", {}).get("underlay", {}).get("wan-link", [])
-        tunnels = current_config.get("overlay", {}).get("tunnel", [])
-
-        wan_link_states = []                                                                #Builds WAN operational states.
-        for wan_link in self._as_list(wan_links):
-            name = wan_link.get("name")
-            metric = self.metric_reader.get_wan_link_metric(name)
-
-            wan_link_states.append({
-                "name": name,
-                "oper-status": "down" if metric.get("stale") else "up",
-                "latency-ms": metric.get("latency_ms"),
-                "jitter-ms": metric.get("jitter_ms"),
-                "loss-percent": metric.get("loss_percent"),
-                "available-bandwidth-kbps": metric.get("available_bandwidth_kbps")})
-
-        tunnel_states = []                                                                  #Builds tunnel operational states.
-        for tunnel in self._as_list(tunnels):
-            name = tunnel.get("name")
-            metric = self.metric_reader.get_tunnel_metric(name)
-
-            tunnel_states.append({
-                "name": name,
-                "oper-status": "down" if metric.get("stale") else "up",
-                "active-wan-link": tunnel.get("bind-wan-link"),
-                "latency-ms": metric.get("latency_ms"),
-                "jitter-ms": metric.get("jitter_ms"),
-                "loss-percent": metric.get("loss_percent"),
-                "available-bandwidth-kbps": metric.get("available_bandwidth_kbps")})
-
-        steering_decisions = self._make_steering_decisions(current_config, wan_link_states, tunnel_states) #Makes steering decisions using current states and policies
-
-        steering_operations = self._build_steering_operations(steering_decisions)
-
+    
+        steering_policies = self._as_list(
+            current_config.get("policy", {}).get("steering", [])
+        )                                                                                   # read all steering policies
+    
+        flow_state_map = {}                                                                 # traffic_class -> flow metric state
+        tunnel_state_map = {}                                                               # tunnel_id -> tunnel metric state
+    
+        for policy in steering_policies:
+            traffic_class = policy.get("class")                                             # traffic class name
+    
+            if not traffic_class:
+                continue
+    
+            uses_wan_link = (
+                policy.get("failover-link-type") == "wan-link"
+                or policy.get("load-balance-link-type") == "wan-link"
+            )                                                                               # this policy uses underlay WAN links
+    
+            uses_tunnel = (
+                policy.get("failover-link-type") == "tunnel"
+                or policy.get("load-balance-link-type") == "tunnel"
+            )                                                                               # this policy uses overlay tunnels
+    
+            if uses_wan_link:
+                flow_id = self.flow_id_fwmarks.get(traffic_class)                           # fwmark/flow_id learned from forwarder
+    
+                metric = self.metric_reader.get_flow_metric(flow_id)                        # read flow metric for this traffic class
+    
+                flow_state_map[traffic_class] = self._metric_to_candidate_state(
+                    traffic_class,
+                    metric
+                )                                                                           # store one flow state per traffic class
+    
+            if uses_tunnel:
+                tunnel_names = []                                                           # collect tunnel candidates used by this policy
+    
+                if policy.get("primary-tunnel"):
+                    tunnel_names.append(policy.get("primary-tunnel"))
+    
+                tunnel_names.extend(self._as_list(policy.get("secondary-tunnel")))
+                tunnel_names.extend(self._as_list(policy.get("load-balance-tunnel")))
+    
+                for tunnel_name in tunnel_names:
+                    if not tunnel_name or tunnel_name in tunnel_state_map:
+                        continue
+    
+                    metric = self.metric_reader.get_tunnel_metric(tunnel_name)              # read tunnel health metric
+    
+                    tunnel_state_map[tunnel_name] = self._metric_to_candidate_state(
+                        tunnel_name,
+                        metric
+                    )                                                                       # store tunnel state by tunnel name
+    
+        steering_decisions = self._make_steering_decisions(
+            current_config,
+            flow_state_map,
+            tunnel_state_map
+        )                                                                                   # make steering decisions using flow and tunnel states
+    
+        steering_operations = self._build_steering_operations(steering_decisions)            # convert decisions to forwarder operations
+    
         if steering_operations:
             self._send_forwarder_transaction(
                 operations=steering_operations,
-                validate_only=False)
-            
-        result = {                                                                                         #Build final result object
-            #"wan_link_states": wan_link_states,        #REMOVE COMMENT IF NEED TO TEST
-            #"tunnel_states": tunnel_states,            #REMOVE COMMENT IF NEED TO TEST
-            "decisions": steering_decisions}
-
-        logging.info("Agent runtime steering cycle completed")                                            #Builds a summary dictionary of everything done in a cycle.
+                validate_only=False
+            )                                                                               # runtime steering is not Clixon validate phase
+    
+        result = {
+            "flow_state_map": flow_state_map,
+            "tunnel_state_map": tunnel_state_map,
+            "decisions": steering_decisions
+        }
+    
+        logging.info("Agent runtime steering cycle completed")
         print("\n===== STEERING DECISIONS =====")
-        print(json.dumps(result, indent=2))                                                               #Logs success message.
-
+        print(json.dumps(result, indent=2))
+    
         return result
 
     def run_forever(self, interval_sec=5):                                                                # Repeat the full execution cycle continuously.
