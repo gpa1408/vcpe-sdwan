@@ -1078,20 +1078,23 @@ class Agent:
 
         return True                                                                        #If all checks pass, candidate satisfies the SLO
 
-    def _metric_to_candidate_state(self, name, metric):                                     # Convert MetricReader output into steering candidate state format
-        metric = metric or {}                                                              # Protect against None from MetricReader
-    
-        return {
+    def _metric_to_candidate_state(self, name, metric, flow_id=None):
+        state = {
             "name": name,                                                                  # WAN link name or tunnel name
             "oper-status": "down" if metric.get("stale") else "up",                       # stale metric means candidate is down
-            "latency-ms": metric.get("latency_ms"),                                        # measured latency
-            "jitter-ms": metric.get("jitter_ms"),                                          # measured jitter
-            "loss-percent": metric.get("loss_percent"),                                    # measured packet loss
-            "available-bandwidth-kbps": metric.get("available_bandwidth_kbps"),            # measured available bandwidth
-            "metric-source": metric.get("source"),                                         # influxdb/fake
-            "metric-reason": metric.get("reason"),                                         # useful when stale
-            "metric-timestamp": metric.get("timestamp")                                    # metric timestamp
-        }
+            "latency-ms": metric.get("latency_ms"),
+            "jitter-ms": metric.get("jitter_ms"),
+            "loss-percent": metric.get("loss_percent"),
+            "available-bandwidth-kbps": metric.get("available_bandwidth_kbps"),
+            "metric-source": metric.get("source"),
+            "metric-reason": metric.get("reason"),
+            "metric-timestamp": metric.get("timestamp")}
+    
+        if flow_id is not None:
+            state["flow-id"] = str(flow_id)                                                # only added for underlay flow metrics
+    
+        return state
+    
     def _extract_candidate_states(self, policy, flow_state_map, tunnel_state_map):        # Build candidates using per-WAN flow metrics for underlay and tunnel metrics for overlay
         traffic_class = policy.get("class")                                               # traffic class associated with this policy
         steering_mode = policy.get("steering-mode")                                       # failover or load-balance
@@ -1356,7 +1359,7 @@ class Agent:
             
                     metric = self.metric_reader.get_flow_metric(flow_id, wan_name)
             
-                    flow_state_map[traffic_class][wan_name] = self._metric_to_candidate_state( wan_name, metric)          # store one flow state per traffic class per wan link
+                    flow_state_map[traffic_class][wan_name] = self._metric_to_candidate_state(flow_id, wan_name, metric)          # store one flow state per traffic class per wan link
     
             if uses_tunnel:
                 tunnel_names = []                                                           # collect tunnel candidates used by this policy
