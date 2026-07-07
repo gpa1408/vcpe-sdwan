@@ -36,7 +36,7 @@ class MetricReader:
             "available_bandwidth_kbps": None,                                         
             "timestamp": None,                                                      
             "stale": True,                                                             
-            "source": "influxdb",                                                     
+            "source": self.reader_mode,                                                     
             "reason": reason}
 
     # =====================================================================================
@@ -61,112 +61,165 @@ class MetricReader:
             "available_bandwidth_kbps": values.get("available_bandwidth_kbps"),        
             "timestamp": timestamp.isoformat(),                                        
             "stale": stale,                                                                         # True if metric is too old
-            "source": "influxdb",
+            "source": self.reader_mode,
         }
     # =====================================================================================
-    # Return fake metric for dry-run testing without InfluxDB
+    # Return fake metric for dry-run testing without InfluxDB (TO BE REMOVED ONCE INFLUXDB IS READY)
     # =====================================================================================
-    def _get_fake_metric(self, metric_id):
-        now = datetime.now(timezone.utc)                                                       # create current timestamp for fake metric
-
-        fake_metrics = {                                                                       # fake metric database for dry run
-            "1001": {                                                                          # fake flow_id/fwmark 1001
+    def _get_fake_metric(self, metric_id, wan_link_name=None):
+        now = datetime.now(timezone.utc)
+    
+        fake_flow_metrics = {
+            ("1001", "UPL1"): {
                 "latency_ms": 20,
                 "jitter_ms": 3,
                 "loss_percent": 0.1,
                 "available_bandwidth_kbps": 50000
             },
-            "1002": {                                                                          # fake flow_id/fwmark 1002
-                "latency_ms": 80,
-                "jitter_ms": 15,
-                "loss_percent": 1.5,
-                "available_bandwidth_kbps": 15000
+            ("1001", "UPL2"): {
+                "latency_ms": 45,
+                "jitter_ms": 8,
+                "loss_percent": 0.5,
+                "available_bandwidth_kbps": 30000
             },
-            "wg01": {                                                                          # fake tunnel metric for wg01
+            ("1001", "UPL3"): {
+                "latency_ms": 90,
+                "jitter_ms": 25,
+                "loss_percent": 3.0,
+                "available_bandwidth_kbps": 5000
+            },
+    
+            ("1002", "UPL1"): {
+                "latency_ms": 15,
+                "jitter_ms": 2,
+                "loss_percent": 0.1,
+                "available_bandwidth_kbps": 40000
+            },
+            ("1002", "UPL2"): {
+                "latency_ms": 60,
+                "jitter_ms": 10,
+                "loss_percent": 0.8,
+                "available_bandwidth_kbps": 20000
+            },
+            ("1002", "UPL3"): {
+                "latency_ms": 110,
+                "jitter_ms": 30,
+                "loss_percent": 4.0,
+                "available_bandwidth_kbps": 6000
+            }
+        }
+    
+        fake_tunnel_metrics = {
+            "wg01": {
                 "latency_ms": 25,
                 "jitter_ms": 4,
                 "loss_percent": 0.2,
                 "available_bandwidth_kbps": 60000
             },
-            "wg02": {                                                                          # fake tunnel metric for wg02
+            "wg02": {
                 "latency_ms": 120,
                 "jitter_ms": 25,
                 "loss_percent": 3.0,
                 "available_bandwidth_kbps": 8000
+            },
+            "wg03": {
+                "latency_ms": 40,
+                "jitter_ms": 8,
+                "loss_percent": 0.5,
+                "available_bandwidth_kbps": 25000
             }
         }
-
-        values = fake_metrics.get(str(metric_id))                                              # get fake metric by flow_id or tunnel_id
-
-        if values is None:                                                                     # if no fake metric exists for this id
-            return self._empty_metric(f"no fake metric found for {metric_id}")                  # return stale metric
-
-        return self._build_metric(values, now, reason="fake metric for dry run")                # return fake metric using same final format
+    
+        if wan_link_name is not None:
+            values = fake_flow_metrics.get((str(metric_id), str(wan_link_name)))
+    
+            if values is None:
+                return self._empty_metric(
+                    f"no fake flow metric found for flow_id={metric_id}, wan_link={wan_link_name}"
+                )
+    
+            return self._build_metric(values, now, reason="fake flow metric for dry run")
+    
+        values = fake_tunnel_metrics.get(str(metric_id))
+    
+        if values is None:
+            return self._empty_metric(f"no fake tunnel metric found for {metric_id}")
+    
+        return self._build_metric(values, now, reason="fake tunnel metric for dry run")
         
     # =====================================================================================
     # Generic function to read latest metric from InfluxDB
     # =====================================================================================
-    def _get_latest_metric(self, measurement, tag_name, tag_value):
-        if tag_value is None or tag_value == "":                                                    # if flow_id/tunnel_id/name is missing, return stale metric
-            return self._empty_metric(f"{tag_name} missing")                            
-
-        flux = f'''                                                                                 # Flux query string starts here
-from(bucket: "{self.influx_bucket}")                                                   
-  |> range(start: -5m)                                                                              # search only recent metrics from last 5 minutes
-  |> filter(fn: (r) => r["_measurement"] == "{measurement}")                                        # "sdwan_flow_metrics" or "sdwan_tunnel_metrics"
-  |> filter(fn: (r) => r["{tag_name}"] == "{tag_value}")                             
-  |> filter(fn: (r) =>                                                                              # Filter only required fields
-      r["_field"] == "latency_ms" or                                                  
-      r["_field"] == "jitter_ms" or                                                     
-      r["_field"] == "loss_percent" or                                                
-      r["_field"] == "available_bandwidth_kbps"                                        
-  )
-  |> last()                                                                                         # get latest value of each field
-'''
+    def _get_latest_metric(self, measurement, tags):
+        if not tags:
+            return self._empty_metric("metric tags missing")
+    
+        tag_filters = ""
+    
+        for tag_name, tag_value in tags.items():
+            if tag_value is None or tag_value == "":
+                return self._empty_metric(f"{tag_name} missing")
+    
+            tag_filters += f'  |> filter(fn: (r) => r["{tag_name}"] == "{tag_value}")\n'
+    
+        flux = f'''
+    from(bucket: "{self.influx_bucket}")
+      |> range(start: -5m)
+      |> filter(fn: (r) => r["_measurement"] == "{measurement}")
+    {tag_filters}  |> filter(fn: (r) =>
+          r["_field"] == "latency_ms" or
+          r["_field"] == "jitter_ms" or
+          r["_field"] == "loss_percent" or
+          r["_field"] == "available_bandwidth_kbps"
+      )
+      |> last()
+    '''
         try:
-            tables = self.query_api.query(org=self.influx_org, query=flux)                          # ends the Flux query to InfluxDB and returns query results as tables
-
-            values = {}                                                                             # stores returned metric values
-            latest_timestamp = None                                                                 # stores the newest timestamp among all returned fields
-
-            for table in tables:                                                                    # loop through returned InfluxDB tables
-                for record in table.records:                                            
-                    field_name = record.get_field()                                     
-                    field_value = record.get_value()                                  
-                    record_time = record.get_time()                             
-
-                    values[field_name] = field_value                                                # save metric value in dictionary
-
-                    if latest_timestamp is None or record_time > latest_timestamp:                  # checks whether this record is newer than the previous records
-                        latest_timestamp = record_time                                              # store newest timestamp (This timestamp is later used to decide whether the metric is stale)
-
-            if not values:                                                                         
-                return self._empty_metric(f"no metric found for {measurement} where {tag_name}={tag_value}")
-
-            return self._build_metric(values, latest_timestamp)                                  
-
-        except Exception as e:                                                                     
-            logging.exception(                                                                      
-                "Failed to read metric from InfluxDB measurement=%s %s=%s: %s",
+            tables = self.query_api.query(org=self.influx_org, query=flux)
+    
+            values = {}
+            latest_timestamp = None
+    
+            for table in tables:
+                for record in table.records:
+                    field_name = record.get_field()
+                    field_value = record.get_value()
+                    record_time = record.get_time()
+    
+                    values[field_name] = field_value
+    
+                    if latest_timestamp is None or record_time > latest_timestamp:
+                        latest_timestamp = record_time
+    
+            if not values:
+                return self._empty_metric(
+                    f"no metric found for {measurement} with tags={tags}"
+                )
+    
+            return self._build_metric(values, latest_timestamp)
+    
+        except Exception as e:
+            logging.exception(
+                "Failed to read metric from InfluxDB measurement=%s tags=%s: %s",
                 measurement,
-                tag_name,
-                tag_value,
+                tags,
                 e
             )
-            return self._empty_metric("influxdb query failed")                                      
-
+            return self._empty_metric("influxdb query failed")
+        
     # =====================================================================================
     # Read underlay traffic-class metric using flow_id/fwmark
     # =====================================================================================
-    def get_flow_metric(self, flow_id):
+    def get_flow_metric(self, flow_id, wan_link_name):
         if self.reader_mode == "fake":                                                         # if dry-run mode is enabled
-            return self._get_fake_metric(flow_id)                                              # return fake flow metric instead of querying InfluxDB
+            return self._get_fake_metric(flow_id, wan_link_name)                                              # return fake flow metric instead of querying InfluxDB
     
-        return self._get_latest_metric(                                                
-            measurement="sdwan_flow_metrics",                                           
-            tag_name="flow_id",                                                      
-            tag_value=str(flow_id))
-
+        return self._get_latest_metric(
+            measurement="sdwan_flow_metrics",
+            tags={
+                "flow_id": str(flow_id),
+                "wan_link": str(wan_link_name)
+            })
     # =====================================================================================
     # Read overlay tunnel metric
     # =====================================================================================
@@ -176,8 +229,9 @@ from(bucket: "{self.influx_bucket}")
 
         return self._get_latest_metric(                                               
             measurement="sdwan_tunnel_metrics",                                  
-            tag_name="tunnel_id",                                                       
-            tag_value=str(name))
+            tags={
+                "flow_id": "1001",
+                "wan_link": "UPL1" })
 
     # =====================================================================================
     # Close InfluxDB client
