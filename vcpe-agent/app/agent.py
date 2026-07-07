@@ -302,47 +302,84 @@ class Agent:
                 self._assign_temporary_fake_fwmark(traffic_class)                         # temporary behavior until forwarder returns fwmark
 
     def _sync_fwmarks_from_forwarder(self):
-        if self.forwarder_dry_run:
-            logging.info("Dry-run: skipping fwmark sync from forwarder")
-            return
+        if self.forwarder_dry_run:                                                        # skip forwarder recovery when forwarder API calls are disabled
+            logging.info("Dry-run: skipping fwmark sync from forwarder")                  # log why sync is skipped
+            return                                                                        # stop here in dry-run mode
     
-        current_config = self.config_reader.get_intended_config()
-        classes = self._as_list(current_config.get("traffic", {}).get("class", []))
+        try:                                                                              # protect startup from forwarder/API errors
+            current_config = self.config_reader.get_intended_config()                     # read current intended config from YANG datastore
     
-        for traffic_class_obj in classes:
-            class_name = traffic_class_obj.get("name")
+            configured_classes = set()                                                    # stores traffic classes currently configured in YANG
     
-            if not class_name:
-                continue
+            classes = self._as_list(                                                      # read configured traffic classes from datastore
+                current_config.get("traffic", {}).get("class", [])
+            )
     
-            policy_id = f"traffic-class-{class_name}"
-            url = f"{self.forwarder_base_url}/api/v1/flow-policies/{policy_id}"
+            for traffic_class_obj in classes:                                             # loop through each configured traffic class
+                class_name = traffic_class_obj.get("name")                                # read traffic class name
     
-            try:
-                response = requests.get(
-                    url,
-                    headers={"Accept": "application/json"},
-                    timeout=10
+                if class_name:                                                            # only store valid class names
+                    configured_classes.add(class_name)                                    # example: video, web
+    
+            url = f"{self.forwarder_base_url}/api/v1/flow-policies"                       # bulk GET to recover all stored forwarder flow policies after restart
+    
+            response = requests.get(                                                      # ask forwarder for all flow policies in one call
+                url,
+                headers={"Accept": "application/json"},
+                timeout=10
+            )
+    
+            if response.status_code == 404:                                                # forwarder does not support bulk GET yet
+                logging.warning(
+                    "Forwarder does not support GET /api/v1/flow-policies yet; "
+                    "temporary fake fwmarks will be assigned when needed"
+                )
+                return                                                                    # continue agent startup without recovered fwmarks
+    
+            response.raise_for_status()                                                   # raise error for other HTTP failures
+    
+            data = response.json()                                                        # parse forwarder JSON response body
+    
+            flow_policies = data.get("flow_policies", [])                                 # expected list of stored flow policies
+    
+            for policy in flow_policies:                                                  # loop through each flow policy returned by forwarder
+                policy_id = (                                                             # accept possible naming variations from forwarder
+                    policy.get("policy_id")
+                    or policy.get("id")
+                    or policy.get("name")
                 )
     
-                if response.status_code == 404:
-                    logging.warning( "Forwarder has no stored fwmark yet for traffic_class=%s; temporary fwmark will be used if needed", class_name )
+                fwmark = policy.get("fwmark")                                             # read fwmark stored by forwarder for this flow policy
+    
+                if not policy_id:                                                         # skip invalid entries without policy id
                     continue
     
-                response.raise_for_status()
+                if not policy_id.startswith("traffic-class-"):                            # agent only needs traffic-class flow policies
+                    continue
     
-                data = response.json()
-                fwmark = data.get("fwmark")
+                traffic_class = policy_id.replace("traffic-class-", "", 1)                # convert traffic-class-video into video
     
-                if fwmark is not None:
-                    self._store_forwarder_fwmark(class_name, fwmark)
-                else:
-                    logging.warning("Forwarder returned flow-policy for traffic_class=%s but no fwmark", class_name  )
+                if traffic_class not in configured_classes:                               # ignore stale forwarder policies not present in current YANG config
+                    logging.info(
+                        "Ignoring forwarder flow-policy=%s because traffic_class=%s is not in datastore",
+                        policy_id,
+                        traffic_class
+                    )
+                    continue
     
-            except Exception as e:
-                logging.exception( "Failed to sync fwmark from forwarder for traffic_class=%s: %s", class_name, e )
+                if fwmark is None:                                                        # forwarder returned policy but no fwmark
+                    logging.warning(
+                        "Forwarder flow-policy=%s has no fwmark",
+                        policy_id
+                    )
+                    continue                                                              # temporary fake fwmark logic will handle this later
     
-        logging.info("Fwmark cache after startup sync: %s", self.flow_id_fwmarks)
+                self._store_forwarder_fwmark(traffic_class, fwmark)                       # store recovered fwmark in runtime cache
+    
+            logging.info("Fwmark cache after startup sync: %s", self.flow_id_fwmarks)     # show final recovered cache
+    
+        except Exception as e:                                                            # catch connection, timeout, JSON, or other errors
+            logging.exception("Failed to sync fwmarks from forwarder: %s", e)             # do not stop agent if startup recovery fails
     
     def _send_forwarder_transaction(self, operations, validate_only):
         payload = {
