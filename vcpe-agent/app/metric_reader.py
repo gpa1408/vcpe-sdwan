@@ -224,14 +224,14 @@ class MetricReader:
     # Read overlay tunnel metric
     # =====================================================================================
     def get_tunnel_metric(self, name):
-        if self.reader_mode == "fake":                                                         # if dry-run mode is enabled
-            return self._get_fake_metric(name)                                                 # return fake tunnel metric instead of querying InfluxDB
-
-        return self._get_latest_metric(                                               
-            measurement="sdwan_tunnel_metrics",                                  
+        if self.reader_mode == "fake":                                                       # if dry-run mode is enabled
+            return self._get_fake_metric(name)                                               # return fake tunnel metric instead of querying InfluxDB
+    
+        return self._get_latest_metric(                                                      # read real tunnel metric from InfluxDB
+            measurement="sdwan_tunnel_metrics",                                             # tunnel metric measurement
             tags={
-                "flow_id": "1001",
-                "wan_link": "UPL1" })
+                "tunnel_id": str(name)                                                       # tunnel metric is identified by tunnel_id, for example wg01
+            } )
 
     # =====================================================================================
     # Close InfluxDB client
