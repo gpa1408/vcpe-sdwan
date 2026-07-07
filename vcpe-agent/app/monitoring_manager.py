@@ -117,7 +117,7 @@ class MonitoringManager:
 
         return payload                                                                        # return sent payload for agent logging/debugging
 
-    def stop_underlay_flow_monitoring(self, flow_id):        
+    def stop_underlay_flow_monitoring(self, flow_id, wan_link_name):        
         url = f"{self.monitoring_base_url}/monitoring/flows/{flow_id}/{wan_link_name}"        # vcpe-monitoring endpoint for deleting flow monitor
 
         if self.dry_run:                                                                      # dry_run if monitoring module is not available
