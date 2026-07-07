@@ -811,22 +811,40 @@ class Agent:
             return                                                                        # stop without failing agent
 
         try:                                                                              # protect Clixon callback from monitoring errors
-            if object_type == "class":                                                    # traffic class deleted
-                class_name = parent_dict.get("name")                                      # read traffic class name
-
-                if not class_name:                                                        # class name is required
-                    logging.warning("Cannot stop monitoring: traffic class has no name")   # log missing name
-                    return                                                                # stop this monitoring action
-
-                flow_id = self.flow_id_fwmarks.get(class_name)                            # get real fwmark/flow_id if available
-
-                if flow_id is None:                                                       # if unavailable during dry-run
-                    flow_id =  self._assign_temporary_fake_fwmark(class_name)             # use same fake flow_id format used during start
-
-                self.monitoring_manager.stop_underlay_flow_monitoring(flow_id, wan_name )    # call monitoring manager to stop underlay flow monitoring
-                self.flow_id_fwmarks.pop(class_name, None)                                # remove cached fwmark if present
-
-                logging.info(                                                             # log successful stop
+            if object_type == "class":                                                              # traffic class deleted
+                class_name = parent_dict.get("name")                                                # read traffic class name
+            
+                if not class_name:                                                                  # class name is required
+                    logging.warning("Cannot stop monitoring: traffic class has no name")            # log missing class name
+                    return                                                                          # stop this monitoring action
+            
+                flow_id = self.flow_id_fwmarks.get(class_name)                                      # get fwmark/flow_id for this class
+            
+                if flow_id is None:                                                                 # if forwarder has not returned fwmark yet
+                    flow_id = self._assign_temporary_fake_fwmark(class_name)                        # use temporary fake fwmark
+            
+                current_config = self.config_reader.get_intended_config()                           # read current datastore config
+                policies = current_config.get("policy", {}).get("steering", [])                    # read steering policies
+            
+                for policy in self._as_list(policies):                                              # loop through steering policies
+                    if policy.get("class") != class_name:                                           # skip other traffic classes
+                        continue                                                                    # continue to next policy
+            
+                    wan_names = []                                                                  # collect WAN links for this traffic class
+            
+                    if policy.get("primary-wan-link"):                                              # failover primary WAN
+                        wan_names.append(policy.get("primary-wan-link"))                            # add primary WAN
+            
+                    wan_names.extend(self._as_list(policy.get("secondary-wan-link")))               # add secondary WANs
+                    wan_names.extend(self._as_list(policy.get("load-balance-wan-link")))            # add load-balance WANs
+            
+                    for wan_name in set(wan_names):                                                 # remove duplicates and loop
+                        if wan_name:                                                                # skip empty values
+                            self.monitoring_manager.stop_underlay_flow_monitoring(flow_id, wan_name) # stop monitor for flow_id + WAN link
+            
+                self.flow_id_fwmarks.pop(class_name, None)                                          # remove cached fwmark after class deletion
+            
+                logging.info(                                                                       # log successful stop handling
                     "Stopped underlay monitoring for class=%s flow_id=%s",
                     class_name,
                     flow_id
