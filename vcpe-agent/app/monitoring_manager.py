@@ -115,18 +115,18 @@ class MonitoringManager:
         response = requests.post(url, json=payload, timeout=5)                            # send POST request to vcpe-monitoring
         response.raise_for_status()                                                      
 
-        return payload                                                                    # return sent payload for agent logging/debugging
+        return payload                                                                        # return sent payload for agent logging/debugging
 
-    def stop_underlay_flow_monitoring(self, flow_id):                                    
-        url = f"{self.monitoring_base_url}/monitoring/flows/{flow_id}/{wan_link_name}"            # vcpe-monitoring endpoint for deleting flow monitor
+    def stop_underlay_flow_monitoring(self, flow_id):        
+        url = f"{self.monitoring_base_url}/monitoring/flows/{flow_id}/{wan_link_name}"        # vcpe-monitoring endpoint for deleting flow monitor
 
-        if self.dry_run:                                                                 # dry_run if monitoring module is not available
+        if self.dry_run:                                                                      # dry_run if monitoring module is not available
             print("\n===== DRY-RUN MONITORING FLOW STOP =====")                          
             print("DELETE", url)                                                         
             return     
                     
-        logging.info("Stopping flow monitoring for flow_id=%s", flow_id)                 
-
+        logging.info("Stopping flow monitoring for flow_id=%s wan_link=%s", flow_id, wan_link_name)
+                
         response = requests.delete(url, timeout=5)                                        # send DELETE request to vcpe-monitoring
         response.raise_for_status()                                                   
 
