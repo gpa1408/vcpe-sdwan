@@ -264,52 +264,86 @@ class Agent:
         self.flow_id_fwmarks[traffic_class] = int(fwmark)                                # store fwmark learned from forwarder for monitoring use
         logging.info("Learned fwmark=%s for traffic_class=%s from forwarder", fwmark, traffic_class) # log learned fwmark
 
+    def _assign_temporary_fake_fwmark(self, traffic_class):                               # REMOVE THIS FUNCTION ONCE FWMARK CREATION IS READY IN FORWARDER
+        if not traffic_class:
+            return None
+    
+        if traffic_class in self.flow_id_fwmarks:
+            return self.flow_id_fwmarks[traffic_class]
+    
+        fake_fwmark = 1000 + len(self.flow_id_fwmarks) + 1
+    
+        self.flow_id_fwmarks[traffic_class] = fake_fwmark
+    
+        logging.warning(
+            "Temporary fake fwmark=%s assigned for traffic_class=%s because forwarder did not return fwmark yet",
+            fake_fwmark,
+            traffic_class
+        )
+
+    return fake_fwmark
 
     def _process_forwarder_transaction_result(self, result):
         if not isinstance(result, dict):                                                  # ignore unexpected response format
             return
     
         for operation_result in result.get("results", []):                                # loop through each operation result returned by forwarder
-            path = operation_result.get("path", "")                                    
-            fwmark = operation_result.get("fwmark")                                    
+            path = operation_result.get("path", "")
+            fwmark = operation_result.get("fwmark")
     
             if not path.startswith("/api/v1/flow-policies/traffic-class-"):               # only flow-policy responses are expected to contain fwmark
                 continue
-     
+    
             traffic_class = path.rsplit("traffic-class-", 1)[-1]                          # extract traffic class name from flow policy path
-            self._store_forwarder_fwmark(traffic_class, fwmark)                           # store returned fwmark in runtime cache
+    
+            if fwmark is not None:
+                self._store_forwarder_fwmark(traffic_class, fwmark)                       # normal final behavior
+            else:
+                self._assign_temporary_fake_fwmark(traffic_class)                         # temporary behavior until forwarder returns fwmark
 
     def _sync_fwmarks_from_forwarder(self):
-        if self.forwarder_dry_run:                                                        # skip GET requests when forwarder API calls are disabled
-            logging.info("Dry-run: skipping fwmark sync from forwarder")                  # log why startup fwmark sync is skipped
-            return                                                                        # stop here in dry-run mode
+        if self.forwarder_dry_run:
+            logging.info("Dry-run: skipping fwmark sync from forwarder")
+            return
     
-        try:                                                                              # try to recover fwmarks from forwarder after reboot/restart
-            current_config = self.config_reader.get_intended_config()                     # read current intended config from Clixon datastore
-            classes = self._as_list(current_config.get("traffic", {}).get("class", []))   # read configured traffic classes from YANG datastore
+        current_config = self.config_reader.get_intended_config()
+        classes = self._as_list(current_config.get("traffic", {}).get("class", []))
     
-            for traffic_class_obj in classes:                                             # loop through each configured traffic class
-                class_name = traffic_class_obj.get("name")                                # read traffic class name from datastore
+        for traffic_class_obj in classes:
+            class_name = traffic_class_obj.get("name")
     
-                if not class_name:                                                        # skip invalid traffic class entry
-                    continue                                                              # continue with next class
+            if not class_name:
+                continue
     
-                policy_id = f"traffic-class-{class_name}"                                 # build forwarder flow-policy ID from traffic class name
-                url = f"{self.forwarder_base_url}/api/v1/flow-policies/{policy_id}"       # request stored fwmark for this flow-policy from forwarder
+            policy_id = f"traffic-class-{class_name}"
+            url = f"{self.forwarder_base_url}/api/v1/flow-policies/{policy_id}"
     
-                response = requests.get(url, headers={"Accept": "application/json"}, timeout=10) # send GET request to forwarder
-                response.raise_for_status()                                               # raise exception if forwarder returns 4xx or 5xx
+            try:
+                response = requests.get(
+                    url,
+                    headers={"Accept": "application/json"},
+                    timeout=10
+                )
     
-                data = response.json()                                                    # parse JSON response from forwarder
-                fwmark = data.get("fwmark")                                               # read fwmark assigned and stored by forwarder
+                if response.status_code == 404:
+                    logging.warning( "Forwarder has no stored fwmark yet for traffic_class=%s; temporary fwmark will be used if needed", class_name )
+                    continue
     
-                self._store_forwarder_fwmark(class_name, fwmark)                          # store fwmark in agent runtime cache for monitoring
+                response.raise_for_status()
     
-            logging.info("Synced fwmarks from forwarder: %s", self.flow_id_fwmarks)       # log final fwmark cache after startup sync
+                data = response.json()
+                fwmark = data.get("fwmark")
     
-        except Exception as e:                                                            # catch connection, timeout, JSON, or response errors
-            logging.exception("Failed to sync fwmarks from forwarder: %s", e)             
-            
+                if fwmark is not None:
+                    self._store_forwarder_fwmark(class_name, fwmark)
+                else:
+                    logging.warning("Forwarder returned flow-policy for traffic_class=%s but no fwmark", class_name  )
+    
+            except Exception as e:
+                logging.exception( "Failed to sync fwmark from forwarder for traffic_class=%s: %s", class_name, e )
+    
+        logging.info("Fwmark cache after startup sync: %s", self.flow_id_fwmarks)
+    
     def _send_forwarder_transaction(self, operations, validate_only):
         payload = {
             "validate_only": validate_only,                                              # "True" during Clixon validate phase, "False" during commit phase. Detection happens in happens in handle_clixon_transaction()
@@ -702,18 +736,34 @@ class Agent:
                     if flow_id is None:                                                   # if forwarder/fwmark is not available during dry-run
                         flow_id = f"test-{class_name}"                                    # use fake flow_id only for dry-run testing
 
-                    payload = self.monitoring_manager.start_underlay_flow_monitoring(      # call monitoring manager for underlay flow monitoring
-                        traffic_class=parent_dict,                                         # traffic class contains five-tuple
-                        steering_policy=policy,                                            # steering policy contains SLO values
-                        flow_id=flow_id                                                    # flow_id is fwmark in final logic
-                    )
-
-                    logging.info(                                                          # log successful dry-run/real monitoring request
-                        "Started underlay monitoring for class=%s payload=%s",
+                wan_names = []
+                
+                if policy.get("primary-wan-link"):
+                    wan_names.append(policy.get("primary-wan-link"))
+                
+                wan_names.extend(self._as_list(policy.get("secondary-wan-link")))
+                wan_names.extend(self._as_list(policy.get("load-balance-wan-link")))
+                
+                seen_wan_names = set()
+                
+                for wan_name in wan_names:
+                    if not wan_name or wan_name in seen_wan_names:
+                        continue
+                
+                    seen_wan_names.add(wan_name)
+                
+                    payload = self.monitoring_manager.start_underlay_flow_monitoring(
+                        traffic_class=parent_dict,
+                        steering_policy=policy,
+                        flow_id=flow_id,
+                        wan_link_name=wan_name )
+                
+                    logging.info(
+                        "Started underlay monitoring for class=%s wan_link=%s payload=%s",
                         class_name,
-                        payload
-                    )
-                    return                                                                # stop after matching policy is processed
+                        wan_name,
+                        payload)
+                return
 
                 logging.info("Skipping monitoring for class=%s because no steering policy exists", class_name) # no policy found for class
 
@@ -1014,11 +1064,11 @@ class Agent:
                     ordered_names.append(primary)
                 ordered_names.extend(self._as_list(policy.get("secondary-wan-link")))
     
-                flow_state = flow_state_map.get(traffic_class)                              # one flow metric for this traffic class
-    
-                for wan_name in ordered_names:
-                    if flow_state:
-                        candidates.append(("wan-link", wan_name, flow_state))               # WAN path name, but SLO checked using class flow metric
+            for wan_name in ordered_names:
+                state = flow_state_map.get(traffic_class, {}).get(wan_name)
+            
+                if state:
+                    candidates.append(("wan-link", wan_name, state))
     
             elif failover_link_type == "tunnel":
                 ordered_names = []                                                          # candidate tunnels in policy order
@@ -1039,8 +1089,10 @@ class Agent:
                 flow_state = flow_state_map.get(traffic_class)                              # one flow metric for this traffic class
     
                 for wan_name in self._as_list(policy.get("load-balance-wan-link")):
-                    if flow_state:
-                        candidates.append(("wan-link", wan_name, flow_state))               # each WAN candidate uses this class flow metric
+                    state = flow_state_map.get(traffic_class, {}).get(wan_name)
+                
+                    if state:
+                        candidates.append(("wan-link", wan_name, state))
     
             elif load_balance_link_type == "tunnel":
                 for tunnel_name in self._as_list(policy.get("load-balance-tunnel")):
@@ -1229,14 +1281,32 @@ class Agent:
             )                                                                               # this policy uses overlay tunnels
     
             if uses_wan_link:
-                flow_id = self.flow_id_fwmarks.get(traffic_class)                           # fwmark/flow_id learned from forwarder
-    
-                metric = self.metric_reader.get_flow_metric(flow_id)                        # read flow metric for this traffic class
-    
-                flow_state_map[traffic_class] = self._metric_to_candidate_state(
-                    traffic_class,
-                    metric
-                )                                                                           # store one flow state per traffic class
+                flow_id = self.flow_id_fwmarks.get(traffic_class)
+            
+                if flow_id is None:
+                    flow_id = self._assign_temporary_fake_fwmark(traffic_class)
+            
+                flow_state_map.setdefault(traffic_class, {})
+            
+                wan_names = []
+            
+                if policy.get("primary-wan-link"):
+                    wan_names.append(policy.get("primary-wan-link"))
+            
+                wan_names.extend(self._as_list(policy.get("secondary-wan-link")))
+                wan_names.extend(self._as_list(policy.get("load-balance-wan-link")))
+            
+                seen_wan_names = set()
+            
+                for wan_name in wan_names:
+                    if not wan_name or wan_name in seen_wan_names:
+                        continue
+            
+                    seen_wan_names.add(wan_name)
+            
+                    metric = self.metric_reader.get_flow_metric(flow_id, wan_name)
+            
+                    flow_state_map[traffic_class][wan_name] = self._metric_to_candidate_state( wan_name, metric)          # store one flow state per traffic class
     
             if uses_tunnel:
                 tunnel_names = []                                                           # collect tunnel candidates used by this policy
