@@ -1359,7 +1359,7 @@ class Agent:
             
                     metric = self.metric_reader.get_flow_metric(flow_id, wan_name)
             
-                    flow_state_map[traffic_class][wan_name] = self._metric_to_candidate_state(flow_id, wan_name, metric)          # store one flow state per traffic class per wan link
+                    flow_state_map[traffic_class][wan_name] = self._metric_to_candidate_state(wan_name, metric,flow_id)          # store one flow state per traffic class per wan link
     
             if uses_tunnel:
                 tunnel_names = []                                                           # collect tunnel candidates used by this policy
