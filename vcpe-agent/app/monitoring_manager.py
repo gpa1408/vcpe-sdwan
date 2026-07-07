@@ -81,7 +81,7 @@ class MonitoringManager:
 
         return sorted(list(tools))                                                         # return stable list such as ["iperf3", "ping"]
 
-    def start_underlay_flow_monitoring(self, traffic_class, steering_policy, flow_id):                    
+    def start_underlay_flow_monitoring(self, traffic_class, steering_policy, flow_id, wan_link_name):                  
         five_tuple = traffic_class.get("five-tuple", {})                               
         dst_prefix = five_tuple.get("dst-prefix")                                      
         destination_ip = self._ip_from_prefix(dst_prefix)                              
@@ -96,6 +96,7 @@ class MonitoringManager:
 
         payload = {                                                                       # payload sent to vcpe-monitoring
             "flow_id": str(flow_id),                                                      # underlay flow ID; this is fwmark received from forwarder via agent.py
+            "wan_link": str(wan_link_name),                                               # candidate WAN link used for this flow probe
             "destination_ip": destination_ip,                                             # target IP where probe packets are sent
             "probe_tools": self._select_probe_tools(slo),                                 # selected tools based on SLO metrics
             "interval_sec": self._calculate_interval_from_slo(slo)                        # selected probe frequency based on SLO strictness
@@ -117,7 +118,7 @@ class MonitoringManager:
         return payload                                                                    # return sent payload for agent logging/debugging
 
     def stop_underlay_flow_monitoring(self, flow_id):                                    
-        url = f"{self.monitoring_base_url}/monitoring/flows/{flow_id}"                    # vcpe-monitoring endpoint for deleting flow monitor
+        url = f"{self.monitoring_base_url}/monitoring/flows/{flow_id}/{wan_link_name}"            # vcpe-monitoring endpoint for deleting flow monitor
 
         if self.dry_run:                                                                 # dry_run if monitoring module is not available
             print("\n===== DRY-RUN MONITORING FLOW STOP =====")                          
