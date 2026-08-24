@@ -59,7 +59,11 @@ class Renderer:
         return plan
 
     def _ensure_allocations(self, state: ForwarderState) -> None:
-        for prefix, labels in (("path", sorted(state.paths)), ("group", sorted(state.path_groups))):
+        for prefix, labels in (
+            ("path", sorted(state.paths)),
+            ("group", sorted(state.path_groups)),
+            ("flow-policy", sorted(state.flow_policies)),
+        ):
             for label in labels:
                 alloc_label = f"{prefix}:{label}"
                 if alloc_label in state.allocations:
@@ -404,7 +408,12 @@ class Renderer:
             tokens.append(f"ip dscp {match.dscp}")
 
         action = policy.action
-        if action.type == "use_path" and action.path_id:
+        if action is None:
+            alloc = current.allocations.get(f"flow-policy:{policy_id}")
+            if alloc is None:
+                return ""
+            tokens.append(f"ct mark set 0x{alloc.ct_mark:x} meta mark set ct mark")
+        elif action.type == "use_path" and action.path_id:
             alloc = current.allocations[f"path:{action.path_id}"]
             tokens.append(f"ct mark set 0x{alloc.ct_mark:x} meta mark set ct mark")
         elif action.type == "use_path_group" and action.path_group_id:

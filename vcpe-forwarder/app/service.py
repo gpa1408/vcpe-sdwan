@@ -1,3 +1,6 @@
+
+
+
 from __future__ import annotations
 
 import re
@@ -11,6 +14,7 @@ from typing import Any
 from .linux import CommandRunner, SystemInspector
 from .models import (
     AccessPoint,
+    Allocation,
     Bridge,
     BridgeMembersUpdate,
     DhcpServer,
@@ -131,13 +135,17 @@ class ForwarderService:
                 last_path = operation.path
                 outcome = self._dispatch_operation(candidate, operation)
                 mutated = mutated or operation.method != "GET"
-                results.append(
-                    TransactionOperationResult(
-                        path=operation.path,
-                        status=outcome.status_code,
-                        message=outcome.message,
-                    )
-                )
+                result_payload: dict[str, Any] = {
+                    "path": operation.path,
+                    "status": outcome.status_code,
+                    "message": outcome.message,
+                }
+
+                fwmark = self._extract_fwmark(outcome.body)
+                if fwmark is not None:
+                    result_payload["fwmark"] = fwmark
+
+                results.append(TransactionOperationResult(**result_payload))
 
             if mutated:
                 self._validate_state(candidate)
@@ -351,7 +359,11 @@ class ForwarderService:
         if path == "/api/v1/paths":
             return OperationOutcome(200, "ok", {"items": self._sorted_values(state.paths)})
         if path == "/api/v1/flow-policies":
-            return OperationOutcome(200, "ok", {"items": self._sorted_values(state.flow_policies)})
+            items = [
+                self._flow_policy_view(state, policy_id)
+                for policy_id in sorted(state.flow_policies)
+            ]
+            return OperationOutcome(200, "ok", {"items": items, "flow_policies": items})
 
         match = re.fullmatch(r"/api/v1/interfaces/([^/]+)", path)
         if match:
@@ -406,7 +418,8 @@ class ForwarderService:
         match = re.fullmatch(r"/api/v1/flow-policies/([^/]+)", path)
         if match:
             policy_id = match.group(1)
-            return OperationOutcome(200, "ok", self._require_mapping_item(state.flow_policies, policy_id, "flow policy"))
+            self._require_mapping_item(state.flow_policies, policy_id, "flow policy")
+            return OperationOutcome(200, "ok", self._flow_policy_view(state, policy_id))
 
         match = re.fullmatch(r"/api/v1/routes/static/([^/]+)", path)
         if match:
@@ -576,7 +589,17 @@ class ForwarderService:
             if method == "PUT":
                 policy = FlowPolicy.model_validate(payload or {})
                 state.flow_policies[policy_id] = policy
-                return OperationOutcome(200, "configured", policy)
+
+                fwmark = None
+                if policy_id.startswith("traffic-class-"):
+                    fwmark = self._ensure_flow_policy_fwmark(state, policy_id)
+
+                return OperationOutcome(
+                200,
+                "configured",
+                self._flow_policy_view(state, policy_id, fwmark=fwmark),
+                )
+
             if method == "DELETE":
                 self._require_mapping_item(state.flow_policies, policy_id, "flow policy")
                 state.flow_policies.pop(policy_id, None)
@@ -763,13 +786,17 @@ class ForwarderService:
 
         for policy_id, policy in state.flow_policies.items():
             action = policy.action
-            if action.type == "use_path" and action.path_id not in state.paths:
-                raise ForwarderError(400, f"flow policy {policy_id} references missing path {action.path_id}")
-            if action.type == "use_path_group" and action.path_group_id not in state.path_groups:
-                raise ForwarderError(
-                    400,
-                    f"flow policy {policy_id} references missing path group {action.path_group_id}",
-                )
+
+            if action is not None:
+                if action.type == "use_path" and action.path_id not in state.paths:
+                    raise ForwarderError(400, f"flow policy {policy_id} references missing path {action.path_id}")
+
+                if action.type == "use_path_group" and action.path_group_id not in state.path_groups:
+                    raise ForwarderError(
+                        400,
+                        f"flow policy {policy_id} references missing path group {action.path_group_id}",
+                    )
+
             if policy.match.ingress_bridge and policy.match.ingress_bridge not in state.bridges:
                 raise ForwarderError(400, f"flow policy {policy_id} references missing bridge {policy.match.ingress_bridge}")
 
