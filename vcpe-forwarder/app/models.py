@@ -36,6 +36,7 @@ class TransactionOperationResult(ForwarderModel):
     path: str
     status: int
     message: str
+    fwmark: int | None = None
 
 
 class TransactionResponse(ForwarderModel):
@@ -173,8 +174,34 @@ class FlowAction(ForwarderModel):
 class FlowPolicy(ForwarderModel):
     priority: int | None = None
     match: FlowMatch
-    action: FlowAction
+    action: FlowAction | None = None
     description: str | None = None
+
+class FirewallRule(ForwarderModel):
+    rule_id: str | None = None
+    priority: int | None = None
+    action: Literal["allow", "deny"]
+    match: FlowMatch = Field(default_factory=FlowMatch)
+    log: bool = False
+    description: str | None = None
+
+
+class SteeringActivePathRequest(ForwarderModel):
+    traffic_class: str | None = None
+    selected_path: str | None = None
+    selected_path_type: Literal["tunnel", "wan-link", "path", "path-group"] | None = None
+    decision_status: Literal["selected", "no-path"] = "selected"
+    reason: str | None = None
+    candidate_summary: dict[str, Any] = Field(default_factory=dict)
+
+
+class SteeringLoadBalanceRequest(ForwarderModel):
+    traffic_class: str | None = None
+    eligible_paths: list[str] = Field(default_factory=list)
+    selected_path_type: Literal["tunnel", "wan-link", "path", "path-group"] | None = None
+    decision_status: Literal["selected", "no-path"] = "selected"
+    reason: str | None = None
+    candidate_summary: dict[str, Any] = Field(default_factory=dict)
 
 
 class StaticRoute(ForwarderModel):
