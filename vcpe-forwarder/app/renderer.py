@@ -60,32 +60,15 @@ class Renderer:
         return plan
 
     def _ensure_allocations(self, state: ForwarderState) -> None:
-        allocation_sources: list[tuple[str, list[str]]] = [
+        flow_policy_labels = set(state.flow_policies)
+        flow_policy_labels.update(f"traffic-class-{tc}" for tc in state.steering_active_paths)
+        flow_policy_labels.update(f"traffic-class-{tc}" for tc in state.steering_load_balances)
+
+        for prefix, labels in (
             ("path", sorted(state.paths)),
             ("group", sorted(state.path_groups)),
-            ("flow-policy", sorted(state.flow_policies)),
-        ]
-
-        active_labels: list[str] = []
-        for traffic_class, decision in sorted(state.steering_active_paths.items()):
-            selected_path = decision.selected_path
-            if (
-                decision.decision_status == "selected"
-                and selected_path
-                and selected_path not in state.paths
-                and selected_path not in state.path_groups
-                and self._can_route_direct(selected_path, state)
-            ):
-                active_labels.append(traffic_class)
-        allocation_sources.append(("steering-active", active_labels))
-
-        lb_labels: list[str] = []
-        for traffic_class, decision in sorted(state.steering_load_balances.items()):
-            if decision.decision_status == "selected" and any(path_id in state.paths for path_id in decision.eligible_paths):
-                lb_labels.append(f"steering-lb-{traffic_class}")
-        allocation_sources.append(("group", lb_labels))
-
-        for prefix, labels in allocation_sources:
+            ("flow-policy", sorted(flow_policy_labels)),
+        ):
             for label in labels:
                 alloc_label = f"{prefix}:{label}"
                 if alloc_label in state.allocations:
@@ -232,44 +215,38 @@ class Renderer:
             commands.extend(self._route_for_group(group_id, current, alloc.route_table))
 
         for traffic_class, decision in sorted(current.steering_active_paths.items()):
+            policy_id = f"traffic-class-{traffic_class}"
+            alloc = current.allocations.get(f"flow-policy:{policy_id}")
             selected_path = decision.selected_path
-            if (
-                decision.decision_status != "selected"
-                or not selected_path
-                or selected_path in current.paths
-                or selected_path in current.path_groups
-                or not self._can_route_direct(selected_path, current)
-            ):
-                continue
 
-            alloc = current.allocations.get(f"steering-active:{traffic_class}")
             if not alloc:
                 continue
 
-            commands.extend(
-                [
-                    f"ip route flush table {alloc.route_table} || true",
-                    f"ip rule replace fwmark 0x{alloc.packet_mark:x}/0xffffffff lookup {alloc.route_table} priority {alloc.priority}",
-                    f"ip route replace default dev {selected_path} table {alloc.route_table}",
-                ]
-            )
+            commands.append(f"ip route flush table {alloc.route_table} || true")
+            commands.append(f"ip rule replace fwmark 0x{alloc.packet_mark:x}/0xffffffff lookup {alloc.route_table} priority {alloc.priority}")
+
+            if decision.decision_status == "selected" and selected_path:
+                commands.extend(self._route_for_selected_path(selected_path, current, alloc.route_table))
 
         for traffic_class, decision in sorted(current.steering_load_balances.items()):
-            eligible_paths = [path_id for path_id in decision.eligible_paths if path_id in current.paths]
-            if decision.decision_status != "selected" or not eligible_paths:
+            if decision.decision_status != "selected" or not decision.eligible_paths:
                 continue
 
-            alloc = current.allocations.get(f"group:steering-lb-{traffic_class}")
+            policy_id = f"traffic-class-{traffic_class}"
+            alloc = current.allocations.get(f"flow-policy:{policy_id}")
             if not alloc:
                 continue
 
-            commands.extend(
-                [
-                    f"ip route flush table {alloc.route_table} || true",
-                    f"ip rule replace fwmark 0x{alloc.packet_mark:x}/0xffffffff lookup {alloc.route_table} priority {alloc.priority}",
-                ]
-            )
-            commands.extend(self._route_for_dynamic_load_balance(eligible_paths, current, alloc.route_table))
+            commands.append(f"ip route flush table {alloc.route_table} || true")
+            commands.append(f"ip rule replace fwmark 0x{alloc.packet_mark:x}/0xffffffff lookup {alloc.route_table} priority {alloc.priority}")
+
+            nexthops: list[str] = []
+            for path_name in decision.eligible_paths:
+                dev = self._device_for_selected_path(path_name, current)
+                if dev:
+                    nexthops.append(f"nexthop dev {dev} weight 1")
+            if nexthops:
+                commands.append(f"ip route replace default {' '.join(nexthops)} table {alloc.route_table}")
 
         for route_set_id, route_set in sorted(current.static_route_sets.items()):
             for route in route_set.routes:
@@ -329,6 +306,28 @@ class Renderer:
                 commands.append(f"ip link set dev {ap.radio_interface} down || true")
 
         return commands
+
+    def _device_for_selected_path(self, selected_path: str, state: ForwarderState) -> str | None:
+        if selected_path in state.paths:
+            path = state.paths[selected_path]
+            return path.tunnel_id if path.type == "wireguard_peer" and path.tunnel_id else path.wan_interface
+        if selected_path in state.tunnels:
+            return selected_path
+        if selected_path in state.interfaces:
+            return selected_path
+        # Fallback: the agent may send the real Linux interface name directly, e.g. ens7.
+        return selected_path
+
+    def _route_for_selected_path(self, selected_path: str, state: ForwarderState, route_table: int) -> list[str]:
+        if selected_path in state.paths:
+            return self._route_for_path(state.paths[selected_path], state, route_table)
+        if selected_path in state.path_groups:
+            return self._route_for_group(selected_path, state, route_table)
+
+        dev = self._device_for_selected_path(selected_path, state)
+        if not dev:
+            return []
+        return [f"ip route replace default dev {dev} table {route_table}"]
 
     def _route_for_path(self, path: ForwardPath, state: ForwarderState, route_table: int) -> list[str]:
         commands: list[str] = []
@@ -533,25 +532,11 @@ class Renderer:
         traffic_class = policy_id.removeprefix("traffic-class-")
 
         active = current.steering_active_paths.get(traffic_class)
-        if active:
-            if active.decision_status == "no-path":
-                return "drop"
+        if active and active.decision_status == "no-path":
+            return "drop"
 
-            selected_path = active.selected_path
-            if selected_path:
-                if selected_path in current.paths:
-                    return current.allocations.get(f"path:{selected_path}")
-                if selected_path in current.path_groups:
-                    return current.allocations.get(f"group:{selected_path}")
-                if self._can_route_direct(selected_path, current):
-                    return current.allocations.get(f"steering-active:{traffic_class}")
-
-        load_balance = current.steering_load_balances.get(traffic_class)
-        if load_balance and load_balance.decision_status == "selected":
-            eligible_paths = [path_id for path_id in load_balance.eligible_paths if path_id in current.paths]
-            if eligible_paths:
-                return current.allocations.get(f"group:steering-lb-{traffic_class}")
-
+        # Important: the flow-policy fwmark is the traffic-class identity returned to the agent.
+        # Steering changes the route table behind this mark; it should not change the packet mark.
         return current.allocations.get(f"flow-policy:{policy_id}")
 
     def _firewall_rule(self, rule_id: str, rule: FirewallRule) -> str:
