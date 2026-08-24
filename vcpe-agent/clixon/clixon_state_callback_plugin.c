@@ -1,12 +1,12 @@
-#include <stdio.h>                                                          // for FILE, fopen(), fgets(), and fclose()
-#include <string.h>                                                         // for strchr(), strstr(), and snprintf()
-#include <dirent.h>                                                         // for opendir(), readdir(), and closedir()
-#include <limits.h>                                                         // for PATH_MAX
+#include <stdio.h>                                                         
+#include <string.h>                                                        
+#include <dirent.h>                                                        
+#include <limits.h>                                                         
 
-#include <cligen/cligen.h>                                                  // for Cligen definitions like cvec, cbuf, and cg_var
-#include <clixon/clixon.h>                                                  // for Clixon plugin API definitions: clixon_handle, cxobj, clixon_plugin_api, clixon_xml_parse_string()
+#include <cligen/cligen.h>                                                  
+#include <clixon/clixon.h>                                               
 
-#define SDWAN_NS "urn:sdwan:cpe"                                            // must match the namespace in sdwan-cpe.yang
+#define SDWAN_NS "urn:sdwan:cpe"                                           
 #define KEY_DIR  "/var/lib/clixon/local-public-keys"                        // directory where agent.py stores tunnel public keys
 #define NAT_DIR  "/var/lib/clixon/wan-link-nat-types"                       // directory where agent.py stores WAN NAT type state
 
