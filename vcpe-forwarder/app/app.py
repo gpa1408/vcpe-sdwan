@@ -15,6 +15,9 @@ from .models import (
     BridgeMembershipRequest,
     DhcpServer,
     FlowPolicy,
+    FirewallRule,
+    SteeringActivePathRequest,
+    SteeringLoadBalanceRequest,
     InterfaceAddressesRequest,
     InterfaceStateRequest,
     NatDiscoveryRequest,
@@ -271,6 +274,56 @@ def create_app(
     def delete_flow_policy(policy_id: str) -> Response:
         service_delete(f"/api/v1/flow-policies/{policy_id}")
         return Response(status_code=204)
+
+    # ---------------------------------------------------------------------
+    # Firewall Rules
+    # ---------------------------------------------------------------------
+
+    @app.get("/api/v1/firewall/rules")
+    def list_firewall_rules():
+        return service_get("/api/v1/firewall/rules")
+
+    @app.get("/api/v1/firewall/rules/{rule_id}")
+    def get_firewall_rule(rule_id: str):
+        return service_get(f"/api/v1/firewall/rules/{rule_id}")
+
+    @app.put("/api/v1/firewall/rules/{rule_id}")
+    def put_firewall_rule(rule_id: str, rule: FirewallRule):
+        return service_put(
+            f"/api/v1/firewall/rules/{rule_id}",
+            rule.model_dump(mode="json"),
+        )
+
+    @app.delete("/api/v1/firewall/rules/{rule_id}", status_code=204)
+    def delete_firewall_rule(rule_id: str) -> Response:
+        service_delete(f"/api/v1/firewall/rules/{rule_id}")
+        return Response(status_code=204)
+
+    # ---------------------------------------------------------------------
+    # Steering Runtime Decisions
+    # ---------------------------------------------------------------------
+
+    @app.get("/api/v1/steering/{traffic_class}/active-path")
+    def get_steering_active_path(traffic_class: str):
+        return service_get(f"/api/v1/steering/{traffic_class}/active-path")
+
+    @app.put("/api/v1/steering/{traffic_class}/active-path")
+    def put_steering_active_path(traffic_class: str, request: SteeringActivePathRequest):
+        return service_put(
+            f"/api/v1/steering/{traffic_class}/active-path",
+            request.model_dump(mode="json"),
+        )
+
+    @app.get("/api/v1/steering/{traffic_class}/load-balance")
+    def get_steering_load_balance(traffic_class: str):
+        return service_get(f"/api/v1/steering/{traffic_class}/load-balance")
+
+    @app.put("/api/v1/steering/{traffic_class}/load-balance")
+    def put_steering_load_balance(traffic_class: str, request: SteeringLoadBalanceRequest):
+        return service_put(
+            f"/api/v1/steering/{traffic_class}/load-balance",
+            request.model_dump(mode="json"),
+        )
 
     # ---------------------------------------------------------------------
     # Static Routes

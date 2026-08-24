@@ -1,6 +1,9 @@
 
 
 
+
+
+
 from __future__ import annotations
 
 import re
@@ -19,6 +22,9 @@ from .models import (
     BridgeMembersUpdate,
     DhcpServer,
     FlowPolicy,
+    FirewallRule,
+    SteeringActivePathRequest,
+    SteeringLoadBalanceRequest,
     ForwarderState,
     Interface,
     NatDiscoveryObserved,
@@ -339,6 +345,58 @@ class ForwarderService:
             extra={"failures": failures},
         )
 
+    def _extract_fwmark(self, body: Any) -> int | None:
+        if isinstance(body, dict):
+            fwmark = body.get("fwmark")
+            if isinstance(fwmark, int):
+                return fwmark
+        return None
+
+    def _ensure_flow_policy_fwmark(self, state: ForwarderState, policy_id: str) -> int:
+        allocation_key = f"flow-policy:{policy_id}"
+        allocation = state.allocations.get(allocation_key)
+
+        if allocation is None:
+            state.allocation_counter += 1
+            index = state.allocation_counter
+            mark = 0x100 + index
+
+            allocation = Allocation(
+                ct_mark=mark,
+                packet_mark=mark,
+                route_table=10100 + index,
+                priority=1000 + index,
+                label=allocation_key,
+            )
+            state.allocations[allocation_key] = allocation
+
+        return allocation.packet_mark
+
+    def _get_flow_policy_fwmark(self, state: ForwarderState, policy_id: str) -> int | None:
+        allocation = state.allocations.get(f"flow-policy:{policy_id}")
+        if allocation is None:
+            return None
+        return allocation.packet_mark
+
+    def _flow_policy_view(
+        self,
+        state: ForwarderState,
+        policy_id: str,
+        *,
+        fwmark: int | None = None,
+    ) -> dict[str, Any]:
+        policy = self._require_mapping_item(state.flow_policies, policy_id, "flow policy")
+        body = policy.model_dump(mode="json")
+        body["policy_id"] = policy_id
+
+        if fwmark is None:
+            fwmark = self._get_flow_policy_fwmark(state, policy_id)
+
+        if fwmark is not None:
+            body["fwmark"] = fwmark
+
+        return body
+
     def _dispatch_operation(self, state: ForwarderState, operation: TransactionOperation) -> OperationOutcome:
         method = operation.method.upper()
         if method == "GET":
@@ -358,6 +416,12 @@ class ForwarderService:
             return OperationOutcome(200, "ok", {"items": self._sorted_values(state.tunnels)})
         if path == "/api/v1/paths":
             return OperationOutcome(200, "ok", {"items": self._sorted_values(state.paths)})
+        if path == "/api/v1/firewall/rules":
+            return OperationOutcome(200, "ok", {"items": self._sorted_values(state.firewall_rules)})
+        if path == "/api/v1/steering/active-paths":
+            return OperationOutcome(200, "ok", {"items": self._sorted_values(state.steering_active_paths)})
+        if path == "/api/v1/steering/load-balances":
+            return OperationOutcome(200, "ok", {"items": self._sorted_values(state.steering_load_balances)})
         if path == "/api/v1/flow-policies":
             items = [
                 self._flow_policy_view(state, policy_id)
@@ -414,6 +478,29 @@ class ForwarderService:
         if match:
             group_id = match.group(1)
             return OperationOutcome(200, "ok", self._require_mapping_item(state.path_groups, group_id, "path group"))
+
+        match = re.fullmatch(r"/api/v1/firewall/rules/([^/]+)", path)
+        if match:
+            rule_id = match.group(1)
+            return OperationOutcome(200, "ok", self._require_mapping_item(state.firewall_rules, rule_id, "firewall rule"))
+
+        match = re.fullmatch(r"/api/v1/steering/([^/]+)/active-path", path)
+        if match:
+            traffic_class = match.group(1)
+            return OperationOutcome(
+                200,
+                "ok",
+                self._require_mapping_item(state.steering_active_paths, traffic_class, "steering active-path decision"),
+            )
+
+        match = re.fullmatch(r"/api/v1/steering/([^/]+)/load-balance", path)
+        if match:
+            traffic_class = match.group(1)
+            return OperationOutcome(
+                200,
+                "ok",
+                self._require_mapping_item(state.steering_load_balances, traffic_class, "steering load-balance decision"),
+            )
 
         match = re.fullmatch(r"/api/v1/flow-policies/([^/]+)", path)
         if match:
@@ -581,6 +668,57 @@ class ForwarderService:
             if method == "DELETE":
                 self._require_mapping_item(state.path_groups, group_id, "path group")
                 state.path_groups.pop(group_id, None)
+                return OperationOutcome(204, "deleted")
+
+        match = re.fullmatch(r"/api/v1/firewall/rules/([^/]+)", path)
+        if match:
+            rule_id = match.group(1)
+            if method == "PUT":
+                rule = FirewallRule.model_validate(payload or {})
+                if rule.rule_id and rule.rule_id != rule_id:
+                    raise ForwarderError(409, f"firewall rule body id {rule.rule_id} does not match {rule_id}")
+                state.firewall_rules[rule_id] = rule.model_copy(update={"rule_id": rule_id})
+                return OperationOutcome(200, "configured", state.firewall_rules[rule_id])
+
+            if method == "DELETE":
+                self._require_mapping_item(state.firewall_rules, rule_id, "firewall rule")
+                state.firewall_rules.pop(rule_id, None)
+                return OperationOutcome(204, "deleted")
+
+        match = re.fullmatch(r"/api/v1/steering/([^/]+)/active-path", path)
+        if match:
+            traffic_class = match.group(1)
+            if method == "PUT":
+                decision = SteeringActivePathRequest.model_validate(payload or {})
+                if decision.traffic_class and decision.traffic_class != traffic_class:
+                    raise ForwarderError(
+                        409,
+                        f"steering active-path body traffic_class {decision.traffic_class} does not match {traffic_class}",
+                    )
+                state.steering_active_paths[traffic_class] = decision.model_copy(update={"traffic_class": traffic_class})
+                return OperationOutcome(200, "configured", state.steering_active_paths[traffic_class])
+
+            if method == "DELETE":
+                self._require_mapping_item(state.steering_active_paths, traffic_class, "steering active-path decision")
+                state.steering_active_paths.pop(traffic_class, None)
+                return OperationOutcome(204, "deleted")
+
+        match = re.fullmatch(r"/api/v1/steering/([^/]+)/load-balance", path)
+        if match:
+            traffic_class = match.group(1)
+            if method == "PUT":
+                decision = SteeringLoadBalanceRequest.model_validate(payload or {})
+                if decision.traffic_class and decision.traffic_class != traffic_class:
+                    raise ForwarderError(
+                        409,
+                        f"steering load-balance body traffic_class {decision.traffic_class} does not match {traffic_class}",
+                    )
+                state.steering_load_balances[traffic_class] = decision.model_copy(update={"traffic_class": traffic_class})
+                return OperationOutcome(200, "configured", state.steering_load_balances[traffic_class])
+
+            if method == "DELETE":
+                self._require_mapping_item(state.steering_load_balances, traffic_class, "steering load-balance decision")
+                state.steering_load_balances.pop(traffic_class, None)
                 return OperationOutcome(204, "deleted")
 
         match = re.fullmatch(r"/api/v1/flow-policies/([^/]+)", path)
@@ -783,6 +921,10 @@ class ForwarderService:
                     raise ForwarderError(400, f"path group {group_id} references missing path {member.path_id}")
             if group.active_path_id and group.active_path_id not in state.paths:
                 raise ForwarderError(400, f"path group {group_id} references missing active path {group.active_path_id}")
+
+        for rule_id, rule in state.firewall_rules.items():
+            if rule.match.ingress_bridge and rule.match.ingress_bridge not in state.bridges:
+                raise ForwarderError(400, f"firewall rule {rule_id} references missing bridge {rule.match.ingress_bridge}")
 
         for policy_id, policy in state.flow_policies.items():
             action = policy.action
