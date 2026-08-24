@@ -199,7 +199,8 @@ class Renderer:
             commands.extend(
                 [
                     f"ip route flush table {alloc.route_table} || true",
-                    f"ip rule replace fwmark 0x{alloc.packet_mark:x}/0xffffffff lookup {alloc.route_table} priority {alloc.priority}",
+                    f"ip rule del fwmark 0x{alloc.packet_mark:x}/0xffffffff lookup {alloc.route_table} priority {alloc.priority} || true",
+                    f"ip rule add fwmark 0x{alloc.packet_mark:x}/0xffffffff lookup {alloc.route_table} priority {alloc.priority}",
                 ]
             )
             commands.extend(self._route_for_path(path, current, alloc.route_table))
@@ -209,7 +210,8 @@ class Renderer:
             commands.extend(
                 [
                     f"ip route flush table {alloc.route_table} || true",
-                    f"ip rule replace fwmark 0x{alloc.packet_mark:x}/0xffffffff lookup {alloc.route_table} priority {alloc.priority}",
+                    f"ip rule del fwmark 0x{alloc.packet_mark:x}/0xffffffff lookup {alloc.route_table} priority {alloc.priority} || true",
+                    f"ip rule add fwmark 0x{alloc.packet_mark:x}/0xffffffff lookup {alloc.route_table} priority {alloc.priority}",
                 ]
             )
             commands.extend(self._route_for_group(group_id, current, alloc.route_table))
@@ -223,7 +225,8 @@ class Renderer:
                 continue
 
             commands.append(f"ip route flush table {alloc.route_table} || true")
-            commands.append(f"ip rule replace fwmark 0x{alloc.packet_mark:x}/0xffffffff lookup {alloc.route_table} priority {alloc.priority}")
+            commands.append(f"ip rule del fwmark 0x{alloc.packet_mark:x}/0xffffffff lookup {alloc.route_table} priority {alloc.priority} || true")
+            commands.append(f"ip rule add fwmark 0x{alloc.packet_mark:x}/0xffffffff lookup {alloc.route_table} priority {alloc.priority}")
 
             if decision.decision_status == "selected" and selected_path:
                 commands.extend(self._route_for_selected_path(selected_path, current, alloc.route_table))
@@ -238,7 +241,8 @@ class Renderer:
                 continue
 
             commands.append(f"ip route flush table {alloc.route_table} || true")
-            commands.append(f"ip rule replace fwmark 0x{alloc.packet_mark:x}/0xffffffff lookup {alloc.route_table} priority {alloc.priority}")
+            commands.append(f"ip rule del fwmark 0x{alloc.packet_mark:x}/0xffffffff lookup {alloc.route_table} priority {alloc.priority} || true")
+            commands.append(f"ip rule add fwmark 0x{alloc.packet_mark:x}/0xffffffff lookup {alloc.route_table} priority {alloc.priority}")
 
             nexthops: list[str] = []
             for path_name in decision.eligible_paths:
