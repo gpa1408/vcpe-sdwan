@@ -9,7 +9,7 @@ class ConfigReader:
         }
 
     def get_intended_config(self):
-        response = requests.get(self.url, headers=self.headers, timeout=5)                     # Send HTTP GET request to Clixon RESTCONF
+        response = requests.get(self.url, headers=self.headers, timeout=15)                     # Send HTTP GET request to Clixon RESTCONF
         response.raise_for_status()                                                            # Raise error for HTTP failures, for example 404 or 500
         data = response.json()                                                                 # Convert JSON response to Python dictionary
       
