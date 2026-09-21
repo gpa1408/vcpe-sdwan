@@ -9,6 +9,7 @@ RUN apk add --no-cache \
     busybox-extras \
     curl \
     ca-certificates
+    dnsmasq
 
 # ---- Runtime settings ----
 WORKDIR /app
