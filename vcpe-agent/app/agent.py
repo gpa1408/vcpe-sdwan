@@ -972,7 +972,8 @@ class Agent:
                     "admin-enabled"):
                     nat_detection_candidates.append(parent_dict)                            #store this WAN object for NAT detection after commit
 
-            added = root.find("added")                                                      # contains newly added datastore objects
+        added = root.find("added")                                                      # contains newly added datastore objects
+        
             if added is not None:
                 for node in added.findall("node"):
             
@@ -990,22 +991,6 @@ class Agent:
                                 "object_type": object_type,
                                 "parent_dict": parent_dict })
                             
-                operations.extend(
-                    self._build_operations_from_parent_xml(
-                        parent_xml,
-                        ["*"],
-                        delete=False))
-                
-                if parent_xml is not None:                                                 # if added object exists
-                    object_type = self._local_name(parent_xml.tag)                         
-                    parent_dict = self._xml_to_dict(parent_xml)                            # convert XML to dict
-
-                    if object_type in ["class", "tunnel"]:                                 
-                        monitoring_start_candidates.append({                               # schedule monitoring start
-                            "object_type": object_type,                               
-                            "parent_dict": parent_dict                                     # object data
-                        })
-
         deleted = root.find("deleted")                                                      # contains deleted datastore objects (normally delete=False, but when clixon reports delete->delete=True)
         if deleted is not None:
             for node in deleted.findall("node"):
