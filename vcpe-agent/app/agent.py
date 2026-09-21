@@ -902,17 +902,18 @@ class Agent:
         if changed is not None:
             for change in changed.findall("change"):
                 new_node = change.find("new")
+                
                 if new_node is None:
                     continue
 
                 changed_leaf = new_node.findtext("node-name")                                   #name of the YANG leaf that changed
                 parent_data = new_node.find("parent-data")                                      #contains the full parent object of the changed leaf
-                parent_xml = self._first_child(parent_data)                                     #extracts the real changed object from parent-data
+                parent_xml = self._first_child(parent_data)                                     #extracts the real changed object from parent_data
 
                 if parent_xml is None:
                     continue
 
-                object_type = self._local_name(parent_xml.tag)                                 #example: wan-link, tunnel, rule, class
+                object_type = self._local_name(parent_xml.tag)                                 #example: wan link, tunnel, rule, class
                 parent_dict = self._xml_to_dict(parent_xml)                                    #converted parent object used by the operation builders
 
                 object_name = (
@@ -930,6 +931,12 @@ class Agent:
                         "changed_leafs": []}
 
                 changed_objects[object_key]["changed_leafs"].append(changed_leaf)                    # stores all changed leafs for this object
+
+                else:
+                    changed_objects[object_key]["parent_dict"] = parent_dict
+                    
+                if changed_leaf not in changed_objects[object_key]["changed_leafs"]:
+                    changed_objects[object_key]["changed_leafs"].append(changed_leaf)
 
         for item in changed_objects.values():                                                # after grouping, build operations once per changed object
             object_type = item["object_type"]
@@ -988,11 +995,7 @@ class Agent:
                 data = node.find("data")
                 deleted_xml = self._first_child(data)
 
-                operations.extend(
-                    self._build_operations_from_parent_xml(
-                        deleted_xml,
-                        ["*"],
-                        delete=True))
+                operations.extend(self._build_operations_from_parent_xml(deleted_xml, ["*"], delete=True))
                 
                 if deleted_xml is not None:                                                # if deleted object exists
                     object_type = self._local_name(deleted_xml.tag)                    
@@ -1001,8 +1004,7 @@ class Agent:
                     if object_type in ["class", "tunnel"]:                                 # only stop monitoring for classes and tunnels
                         monitoring_stop_candidates.append({                                # schedule monitoring stop
                             "object_type": object_type,                                
-                            "parent_dict": parent_dict                                
-                        })
+                            "parent_dict": parent_dict})
 
         if not operations:                                                                  #if this config change has no forwarder mapping, return OK without sending anything
             return {
