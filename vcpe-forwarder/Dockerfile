@@ -8,7 +8,7 @@ RUN apk add --no-cache \
     wireguard-tools \
     busybox-extras \
     curl \
-    ca-certificates
+    ca-certificates \
     dnsmasq                              #NEW LINE PAMODI
 
 # ---- Runtime settings ----
