@@ -9,7 +9,8 @@ RUN apk add --no-cache \
     busybox-extras \
     curl \
     ca-certificates \
-    dnsmasq                              #NEW LINE PAMODI
+    dnsmasq \                          #NEW LINE PAMODI
+    bash
 
 # ---- Runtime settings ----
 WORKDIR /app
