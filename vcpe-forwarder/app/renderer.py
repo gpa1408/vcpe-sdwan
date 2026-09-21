@@ -311,25 +311,21 @@ class Renderer:
             pid_path = f"/run/dnsmasq-{server_id}.pid"
         
             plan.files[conf_path] = self._dnsmasq_config(server)
+
+            commands.append("mkdir -p /app/etc/forwarder/dnsmasq")
         
-            commands.append(
-                f"install -m 0644 /app/{conf_path} {active_conf_path}"
-            )
+            commands.append(f"install -m 0644 /app/{conf_path} {active_conf_path}")
         
             if server.enabled:
                 commands.append(
                     f"if [ -f {pid_path} ]; then "
                     f"kill $(cat {pid_path}) >/dev/null 2>&1 || true; "
                     f"rm -f {pid_path}; "
-                    f"fi"
-                )
-        
+                    f"fi"     )
                 commands.append(
                     f"dnsmasq "
                     f"--conf-file={active_conf_path} "
-                    f"--pid-file={pid_path}"
-                )
-        
+                    f"--pid-file={pid_path}" )
             else:
                 commands.append(
                     f"if [ -f {pid_path} ]; then "
