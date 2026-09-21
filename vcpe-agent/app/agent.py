@@ -974,24 +974,25 @@ class Agent:
 
         added = root.find("added")                                                      # contains newly added datastore objects
         
-            if added is not None:
-                for node in added.findall("node"):
+        if added is not None:
+            for node in added.findall("node"):
             
-                    data = node.find("data")                                                # contains the actual object added by Clixon
-                    added_xml = self._first_child(data)                                     # extract actual added object
+                data = node.find("data")                                                # contains the actual object added by Clixon
+                added_xml = self._first_child(data)                                     # extract actual added object
             
-                    operations.extend(self._build_operations_from_parent_xml(added_xml,["*"], delete=False))
+                operations.extend(self._build_operations_from_parent_xml(added_xml,["*"], delete=False))
             
-                    if added_xml is not None:
-                        object_type = self._local_name(added_xml.tag)
-                        parent_dict = self._xml_to_dict(added_xml)
+                if added_xml is not None:
+                    object_type = self._local_name(added_xml.tag)
+                    parent_dict = self._xml_to_dict(added_xml)
             
-                        if object_type in ["class", "tunnel"]:
-                            monitoring_start_candidates.append({
-                                "object_type": object_type,
-                                "parent_dict": parent_dict })
+                    if object_type in ["class", "tunnel"]:
+                        monitoring_start_candidates.append({
+                            "object_type": object_type,
+                            "parent_dict": parent_dict })
                             
         deleted = root.find("deleted")                                                      # contains deleted datastore objects (normally delete=False, but when clixon reports delete->delete=True)
+        
         if deleted is not None:
             for node in deleted.findall("node"):
                 data = node.find("data")
