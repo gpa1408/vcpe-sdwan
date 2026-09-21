@@ -708,7 +708,7 @@ class Agent:
             return self._build_wan_link_operations(parent_dict, changed_leafs, delete)
 
         if object_type == "lan-link":
-            return self._build_lan_link_operations(parent_dict, changed_leafs, delete).
+            return self._build_lan_link_operations(parent_dict, changed_leafs, delete)
 
         if object_type == "lan":                                                                     # Clixon may report the whole LAN container as added/deleted when the first or last lan-link is added/deleted.
             operations = []
