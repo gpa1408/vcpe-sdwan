@@ -180,6 +180,7 @@ class ForwarderService:
 
         self._validate_state(snapshot)
         plan = self.renderer.render_transition(previous, snapshot, revision)
+        self.store.save_render_plan(plan)                            #NEW LINE PAMODI
         journal = self.runner.run_plan(plan.phases)
         self.store.save_render_plan(plan, journal)
         self._raise_for_failures(revision, journal)
@@ -316,6 +317,7 @@ class ForwarderService:
     def _apply_candidate(self, previous: ForwarderState, candidate: ForwarderState) -> RevisionInfo:
         revision = self._predict_revision(previous, candidate)
         plan = self.renderer.render_transition(previous, candidate, revision)
+        self.store.save_render_plan(plan)                                #NEW LINE PAMODI
         journal = self.runner.run_plan(plan.phases)
         self.store.save_render_plan(plan, journal)
         self._raise_for_failures(revision, journal)
