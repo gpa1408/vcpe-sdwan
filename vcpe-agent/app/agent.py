@@ -972,12 +972,24 @@ class Agent:
                     "admin-enabled"):
                     nat_detection_candidates.append(parent_dict)                            #store this WAN object for NAT detection after commit
 
-        added = root.find("added")                                                          #contains newly added datastore objects
-        if added is not None:
-            for node in added.findall("node"):
-                parent_data = node.find("parent-data")
-                parent_xml = self._first_child(parent_data)                                 #extracts the real changed object from parent-data
-
+            added = root.find("added")                                                      # contains newly added datastore objects
+            if added is not None:
+                for node in added.findall("node"):
+            
+                    data = node.find("data")                                                # contains the actual object added by Clixon
+                    added_xml = self._first_child(data)                                     # extract actual added object
+            
+                    operations.extend(self._build_operations_from_parent_xml(added_xml,["*"], delete=False))
+            
+                    if added_xml is not None:
+                        object_type = self._local_name(added_xml.tag)
+                        parent_dict = self._xml_to_dict(added_xml)
+            
+                        if object_type in ["class", "tunnel"]:
+                            monitoring_start_candidates.append({
+                                "object_type": object_type,
+                                "parent_dict": parent_dict })
+                            
                 operations.extend(
                     self._build_operations_from_parent_xml(
                         parent_xml,
