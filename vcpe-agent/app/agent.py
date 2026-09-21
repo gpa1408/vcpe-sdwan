@@ -929,9 +929,6 @@ class Agent:
                         "object_type": object_type,
                         "parent_dict": parent_dict,
                         "changed_leafs": []}
-
-                changed_objects[object_key]["changed_leafs"].append(changed_leaf)                    # stores all changed leafs for this object
-
                 else:
                     changed_objects[object_key]["parent_dict"] = parent_dict
                     
