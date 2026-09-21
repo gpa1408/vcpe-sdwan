@@ -305,7 +305,7 @@ class Renderer:
              #   commands.append(f"systemctl stop dnsmasq@{server_id} || true")
              #   commands.append(f"systemctl disable dnsmasq@{server_id} || true")
 
-        for server_id, server in sorted(current.dhcp_servers.items()):
+        for server_id, server in sorted(current.dhcp_servers.items()):                                   #NEW LINE PAMODI
             conf_path = f"var/lib/forwarder/rendered/{revision}/dnsmasq/{server_id}.conf"
             active_conf_path = f"/app/etc/forwarder/dnsmasq/{server_id}.conf"
             pid_path = f"/run/dnsmasq-{server_id}.pid"
@@ -321,19 +321,26 @@ class Renderer:
                     f"if [ -f {pid_path} ]; then "
                     f"kill $(cat {pid_path}) >/dev/null 2>&1 || true; "
                     f"rm -f {pid_path}; "
-                    f"fi"     )
+                    f"else "
+                    f"pkill -f '^dnsmasq --conf-file={active_conf_path}' >/dev/null 2>&1 || true; "
+                    f"fi" )
+            
+                commands.append("sleep 1")
+            
                 commands.append(
                     f"dnsmasq "
                     f"--conf-file={active_conf_path} "
-                    f"--pid-file={pid_path}" )
+                    f"--pid-file={pid_path}")
+            
             else:
                 commands.append(
                     f"if [ -f {pid_path} ]; then "
                     f"kill $(cat {pid_path}) >/dev/null 2>&1 || true; "
                     f"rm -f {pid_path}; "
-                    f"fi"
-                )
-
+                    f"else "
+                    f"pkill -f '^dnsmasq --conf-file={active_conf_path}' >/dev/null 2>&1 || true; "
+                    f"fi"  )                                                                      #NEW LINE PAMODI
+    
         for ap_id, ap in sorted(current.access_points.items()):
             conf_path = f"var/lib/forwarder/rendered/{revision}/hostapd/{ap_id}.conf"
             plan.files[conf_path] = self._hostapd_config(ap)
