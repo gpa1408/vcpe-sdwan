@@ -16,8 +16,8 @@
   contact
     "Author: Pamodi Ranathunga";
   description
-    "YANG model for an SD-WAN CPE supporting underlay WAN links, LAN services, WireGuard-based overlays, traffic classification,
-     policy-based steering, firewall configuration, forwarder-facing path objects, path groups, NAT services, static routing, and
+    "YANG model for SD-WAN CPE supporting underlay WAN links, LAN services, WireGuard-based overlays, traffic classification,
+     policy based steering, firewall configuration, forwarder facing path objects, path groups, NAT services, static routing, and
      operational state reporting.";
 
   revision 2026-05-12 {
