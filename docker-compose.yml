@@ -1,12 +1,18 @@
-
 services:
-  # vCPE Forwarder (dataplane programmer)
+
+  # ============================================================
+  # vCPE Forwarder
+  # Dataplane programming component
+  # ============================================================
   vcpe-forwarder:
     build:
       context: ./vcpe-forwarder
+
     container_name: vcpe-forwarder
     restart: unless-stopped
 
+    # Required because the Forwarder must directly access
+    # Linux interfaces, routing tables, nftables and WireGuard.
     network_mode: host
 
     cap_add:
@@ -22,38 +28,61 @@ services:
       - STATE_DIR=/state
       - FORWARDER_EXECUTE=1
 
-
     volumes:
       - vcpe_forwarder_state:/state
 
 
-
-  # vCPE Agent (control-plane logic)
-  # External controller calls the agent (announce, keepalive/)
+  # ============================================================
+  # vCPE Agent
+  # Control-plane / orchestration logic
+  # ============================================================
   vcpe-agent:
     build:
       context: ./vcpe-agent
+
     container_name: vcpe-agent
-    restart: unless-stopped  #restart docker if crashed when starts
+    restart: unless-stopped
 
     environment:
       - API_BIND=0.0.0.0
       - API_PORT=8080
+
+      # --------------------------------------------------------
+      # Forwarder
+      # Forwarder uses host networking, therefore Agent reaches
+      # it through the Docker host gateway.
+      # --------------------------------------------------------
       - FORWARDER_URL=http://host.docker.internal:9090
 
-      # If agent also calls SBI/Clixon internally (local service)
-      - SBI_URL=http://127.0.0.1:8383 
+      # --------------------------------------------------------
+      # SBI / Clixon
+      # --------------------------------------------------------
+      - SBI_URL=http://127.0.0.1:8383
 
-      # if agent calls monitoring
-      - MONITORING_URL=http://vcpe-monitoring:9100
-      #Pull dal influx db da parte dell'agent
+      # --------------------------------------------------------
+      # Monitoring
+      # Monitoring also uses host networking.
+      # --------------------------------------------------------
+      - MONITORING_URL=http://host.docker.internal:9100
+
+      # --------------------------------------------------------
+      # InfluxDB
+      # Agent remains inside Docker mgmt network and therefore
+      # can use the Docker service name "influxdb".
+      # --------------------------------------------------------
       - INFLUX_URL=http://influxdb:8086
       - INFLUX_BUCKET=vcpe
       - INFLUX_ORG=thesis
       - INFLUX_TOKEN=${INFLUX_TOKEN}
-      - METRIC_READER_MODE=fake                                                         # fake metrics until InfluxDB metric writing is ready
 
-      # Controller URL for outbound calls (if you do both push+pull)
+      # Keep fake for now.
+      # Change to real/influx mode once Metric Reader integration
+      # is implemented and tested.
+      - METRIC_READER_MODE=fake
+
+      # --------------------------------------------------------
+      # External SD-WAN Controller
+      # --------------------------------------------------------
       - CONTROLLER_URL=http://${CONTROLLER_IP}:8080
 
     extra_hosts:
@@ -67,7 +96,6 @@ services:
     volumes:
       - vcpe_sbi_state:/var/lib/clixon
 
-    # controller must reach the agent externally
     ports:
       - "8080:8080"
       - "8383:8383"
@@ -76,46 +104,103 @@ services:
       - mgmt
 
 
-
-  # -------------------------
-  # Monitoring service
-  # Expose an external port so metrics can be queried externally.
-  # -------------------------
+  # ============================================================
+  # vCPE Monitoring
+  #
+  # Receives monitoring jobs from Agent.
+  # Executes active probes.
+  # Writes metrics into InfluxDB.
+  # ============================================================
   vcpe-monitoring:
     build:
       context: ./vcpe-monitoring
+
     container_name: vcpe-monitoring
     restart: unless-stopped
 
+    # IMPORTANT:
+    # Monitoring must see the real Linux WAN/WireGuard interfaces
+    # in order to bind probes to ens6, ens7, wg01, etc.
+    network_mode: host
+
+    cap_add:
+      - NET_RAW
+
     environment:
+
+      # --------------------------------------------------------
+      # Monitoring REST API
+      # --------------------------------------------------------
       - API_BIND=0.0.0.0
       - API_PORT=9100
+      - LOG_LEVEL=INFO
 
-      # If pushing metrics to Influx internally:
-      - INFLUX_URL=http://influxdb:8086
+      # --------------------------------------------------------
+      # Logical SD-WAN WAN name -> Linux interface
+      #
+      # Adapt this mapping to the real interfaces on the host /
+      # Raspberry Pi.
+      #
+      # Current GNS3 example:
+      # UPL1 -> ens6
+      # UPL2 -> ens7
+      # --------------------------------------------------------
+      - 'WAN_LINK_MAP_JSON={"UPL1":"ens6","UPL2":"ens7"}'
+
+      # --------------------------------------------------------
+      # InfluxDB
+      #
+      # Monitoring is using network_mode: host.
+      # It therefore reaches the host-published InfluxDB port.
+      # --------------------------------------------------------
+      - INFLUX_URL=http://127.0.0.1:8086
       - INFLUX_BUCKET=vcpe
       - INFLUX_ORG=thesis
       - INFLUX_TOKEN=${INFLUX_TOKEN}
-    # INT monitoring PURPOSES
-    cap_add:
-      - NET_RAW
+
+      # --------------------------------------------------------
+      # Ping probe configuration
+      # --------------------------------------------------------
+      - PING_COUNT=4
+      - PING_PROCESS_TIMEOUT_SEC=10
+
+      # --------------------------------------------------------
+      # iperf3 probe configuration
+      # --------------------------------------------------------
+      - IPERF_PORT=5201
+      - IPERF_DURATION_SEC=3
+      - IPERF_PROCESS_TIMEOUT_SEC=12
+      - IPERF_BIND_DEVICE=true
+
+      # --------------------------------------------------------
+      # TWAMP
+      #
+      # Leave empty until the TWAMP client/reflector
+      # implementation is selected.
+      # --------------------------------------------------------
+      - TWAMP_COMMAND_TEMPLATE=
 
     depends_on:
       - influxdb
 
-    # external queries to monitoring/metrics
-    ports:
-      - "9100:9100"
+    # DO NOT add:
+    #
+    # ports:
+    #   - "9100:9100"
+    #
+    # because network_mode: host already exposes port 9100
+    # directly on the host.
+    #
+    # DO NOT attach this container to "mgmt" either.
 
-    networks:
-      - mgmt
 
-
-  # -------------------------
-  # InfluxDB (time series DB)
-  # -------------------------
+  # ============================================================
+  # InfluxDB
+  # Time-series database used by Monitoring + Agent Metric Reader
+  # ============================================================
   influxdb:
     image: influxdb:2.7
+
     container_name: influxdb
     restart: unless-stopped
 
@@ -137,11 +222,13 @@ services:
       - mgmt
 
 
-  # -------------------------
-  # Grafana dashboard for visualize metrics in dashboard
-  # -------------------------
+  # ============================================================
+  # Grafana
+  # Monitoring visualization
+  # ============================================================
   grafana:
     image: grafana/grafana:11.2.0
+
     container_name: grafana
     restart: unless-stopped
 
@@ -158,10 +245,17 @@ services:
       - mgmt
 
 
+# ==============================================================
+# Docker internal management network
+# ==============================================================
 networks:
   mgmt:
     driver: bridge
 
+
+# ==============================================================
+# Persistent volumes
+# ==============================================================
 volumes:
   vcpe_forwarder_state:
   vcpe_sbi_state:
