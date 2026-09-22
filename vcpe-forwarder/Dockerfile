@@ -8,7 +8,9 @@ RUN apk add --no-cache \
     wireguard-tools \
     busybox-extras \
     curl \
-    ca-certificates
+    ca-certificates \
+    dnsmasq \                        
+    bash
 
 # ---- Runtime settings ----
 WORKDIR /app

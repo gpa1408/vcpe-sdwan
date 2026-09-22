@@ -710,6 +710,14 @@ class Agent:
         if object_type == "lan-link":
             return self._build_lan_link_operations(parent_dict, changed_leafs, delete)
 
+        if object_type == "lan":                                                                     # Clixon may report the whole LAN container as added/deleted when the first or last lan-link is added/deleted.
+            operations = []
+            for lan_link in self._as_list(parent_dict.get("lan-link")):
+                if not isinstance(lan_link, dict):
+                    continue
+                operations.extend(self._build_lan_link_operations(lan_link, changed_leafs, delete))
+            return operations
+
         if object_type == "tunnel":
             return self._build_tunnel_operations(parent_dict, changed_leafs, delete)
 
@@ -902,17 +910,18 @@ class Agent:
         if changed is not None:
             for change in changed.findall("change"):
                 new_node = change.find("new")
+                
                 if new_node is None:
                     continue
 
                 changed_leaf = new_node.findtext("node-name")                                   #name of the YANG leaf that changed
                 parent_data = new_node.find("parent-data")                                      #contains the full parent object of the changed leaf
-                parent_xml = self._first_child(parent_data)                                     #extracts the real changed object from parent-data
+                parent_xml = self._first_child(parent_data)                                     #extracts the real changed object from parent_data
 
                 if parent_xml is None:
                     continue
 
-                object_type = self._local_name(parent_xml.tag)                                 #example: wan-link, tunnel, rule, class
+                object_type = self._local_name(parent_xml.tag)                                 #example: wan link, tunnel, rule, class
                 parent_dict = self._xml_to_dict(parent_xml)                                    #converted parent object used by the operation builders
 
                 object_name = (
@@ -928,8 +937,11 @@ class Agent:
                         "object_type": object_type,
                         "parent_dict": parent_dict,
                         "changed_leafs": []}
-
-                changed_objects[object_key]["changed_leafs"].append(changed_leaf)                    # stores all changed leafs for this object
+                else:
+                    changed_objects[object_key]["parent_dict"] = parent_dict
+                    
+                if changed_leaf not in changed_objects[object_key]["changed_leafs"]:
+                    changed_objects[object_key]["changed_leafs"].append(changed_leaf)
 
         for item in changed_objects.values():                                                # after grouping, build operations once per changed object
             object_type = item["object_type"]
@@ -960,39 +972,33 @@ class Agent:
                     "admin-enabled"):
                     nat_detection_candidates.append(parent_dict)                            #store this WAN object for NAT detection after commit
 
-        added = root.find("added")                                                          #contains newly added datastore objects
+        added = root.find("added")                                                      # contains newly added datastore objects
+        
         if added is not None:
             for node in added.findall("node"):
-                parent_data = node.find("parent-data")
-                parent_xml = self._first_child(parent_data)                                 #extracts the real changed object from parent-data
-
-                operations.extend(
-                    self._build_operations_from_parent_xml(
-                        parent_xml,
-                        ["*"],
-                        delete=False))
-                
-                if parent_xml is not None:                                                 # if added object exists
-                    object_type = self._local_name(parent_xml.tag)                         
-                    parent_dict = self._xml_to_dict(parent_xml)                            # convert XML to dict
-
-                    if object_type in ["class", "tunnel"]:                                 
-                        monitoring_start_candidates.append({                               # schedule monitoring start
-                            "object_type": object_type,                               
-                            "parent_dict": parent_dict                                     # object data
-                        })
-
+            
+                data = node.find("data")                                                # contains the actual object added by Clixon
+                added_xml = self._first_child(data)                                     # extract actual added object
+            
+                operations.extend(self._build_operations_from_parent_xml(added_xml,["*"], delete=False))
+            
+                if added_xml is not None:
+                    object_type = self._local_name(added_xml.tag)
+                    parent_dict = self._xml_to_dict(added_xml)
+            
+                    if object_type in ["class", "tunnel"]:
+                        monitoring_start_candidates.append({
+                            "object_type": object_type,
+                            "parent_dict": parent_dict })
+                            
         deleted = root.find("deleted")                                                      # contains deleted datastore objects (normally delete=False, but when clixon reports delete->delete=True)
+        
         if deleted is not None:
             for node in deleted.findall("node"):
                 data = node.find("data")
                 deleted_xml = self._first_child(data)
 
-                operations.extend(
-                    self._build_operations_from_parent_xml(
-                        deleted_xml,
-                        ["*"],
-                        delete=True))
+                operations.extend(self._build_operations_from_parent_xml(deleted_xml, ["*"], delete=True))
                 
                 if deleted_xml is not None:                                                # if deleted object exists
                     object_type = self._local_name(deleted_xml.tag)                    
@@ -1001,8 +1007,7 @@ class Agent:
                     if object_type in ["class", "tunnel"]:                                 # only stop monitoring for classes and tunnels
                         monitoring_stop_candidates.append({                                # schedule monitoring stop
                             "object_type": object_type,                                
-                            "parent_dict": parent_dict                                
-                        })
+                            "parent_dict": parent_dict})
 
         if not operations:                                                                  #if this config change has no forwarder mapping, return OK without sending anything
             return {

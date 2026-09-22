@@ -105,13 +105,24 @@ class Renderer:
                         commands.append(f"ip route del {host}/32 || true")
 
         for server_id in sorted(set(previous.dhcp_servers) - set(current.dhcp_servers)):
-            commands.extend(
-                [
-                    f"systemctl stop dnsmasq@{server_id} || true",
-                    f"systemctl disable dnsmasq@{server_id} || true",
-                    f"rm -f etc/forwarder/dnsmasq/{server_id}.conf",
-                ]
-            )
+           # commands.extend(
+            #    [
+            #        f"systemctl stop dnsmasq@{server_id} || true",
+            #        f"systemctl disable dnsmasq@{server_id} || true",
+            #        f"rm -f etc/forwarder/dnsmasq/{server_id}.conf",
+            #    ]
+            #)
+
+            pid_path = f"/run/dnsmasq-{server_id}.pid"                                         #NEW LINE PAMODI
+            commands.extend(                                                                  #NEW LINE PAMODI
+                [ (                                                                        #NEW LINE PAMODI
+                        f"if [ -f {pid_path} ]; then "                                        #NEW LINE PAMODI
+                        f"kill $(cat {pid_path}) >/dev/null 2>&1 || true; "                  #NEW LINE PAMODI
+                        f"rm -f {pid_path}; "                                                #NEW LINE PAMODI
+                        f"fi"                                                                #NEW LINE PAMODI
+                    ),                                                                        #NEW LINE PAMODI
+                    f"rm -f /app/etc/forwarder/dnsmasq/{server_id}.conf",  ] )                 #NEW LINE PAMODI
+              
 
         for ap_id in sorted(set(previous.access_points) - set(current.access_points)):
             old_ap = previous.access_points[ap_id]
@@ -283,17 +294,53 @@ class Renderer:
     def _render_services(self, previous: ForwarderState, current: ForwarderState, revision: str, plan: RenderPlan) -> list[str]:
         commands: list[str] = []
 
-        for server_id, server in sorted(current.dhcp_servers.items()):
-            conf_path = f"var/lib/forwarder/rendered/{revision}/dnsmasq/{server_id}.conf"
-            plan.files[conf_path] = self._dnsmasq_config(server)
-            commands.append(f"install -m 0644 {conf_path} etc/forwarder/dnsmasq/{server_id}.conf")
-            if server.enabled:
-                commands.append(f"systemctl restart dnsmasq@{server_id}")
-                commands.append(f"systemctl enable dnsmasq@{server_id}")
-            else:
-                commands.append(f"systemctl stop dnsmasq@{server_id} || true")
-                commands.append(f"systemctl disable dnsmasq@{server_id} || true")
+        #for server_id, server in sorted(current.dhcp_servers.items()):
+        #    conf_path = f"var/lib/forwarder/rendered/{revision}/dnsmasq/{server_id}.conf"
+         #   plan.files[conf_path] = self._dnsmasq_config(server)
+        #    commands.append(f"install -m 0644 {conf_path} etc/forwarder/dnsmasq/{server_id}.conf")
+         #   if server.enabled:
+           #     commands.append(f"systemctl restart dnsmasq@{server_id}")
+            #    commands.append(f"systemctl enable dnsmasq@{server_id}")
+            #else:
+             #   commands.append(f"systemctl stop dnsmasq@{server_id} || true")
+             #   commands.append(f"systemctl disable dnsmasq@{server_id} || true")
 
+        for server_id, server in sorted(current.dhcp_servers.items()):                                   #NEW LINE PAMODI
+            conf_path = f"var/lib/forwarder/rendered/{revision}/dnsmasq/{server_id}.conf"
+            active_conf_path = f"/app/etc/forwarder/dnsmasq/{server_id}.conf"
+            pid_path = f"/run/dnsmasq-{server_id}.pid"
+        
+            plan.files[conf_path] = self._dnsmasq_config(server)
+
+            commands.append("mkdir -p /app/etc/forwarder/dnsmasq")
+        
+            commands.append(f"install -m 0644 /app/{conf_path} {active_conf_path}")
+        
+            if server.enabled:
+                commands.append(
+                    f"if [ -f {pid_path} ]; then "
+                    f"kill $(cat {pid_path}) >/dev/null 2>&1 || true; "
+                    f"rm -f {pid_path}; "
+                    f"else "
+                    f"pkill -f '^dnsmasq --conf-file={active_conf_path}' >/dev/null 2>&1 || true; "
+                    f"fi" )
+            
+                commands.append("sleep 1")
+            
+                commands.append(
+                    f"dnsmasq "
+                    f"--conf-file={active_conf_path} "
+                    f"--pid-file={pid_path}")
+            
+            else:
+                commands.append(
+                    f"if [ -f {pid_path} ]; then "
+                    f"kill $(cat {pid_path}) >/dev/null 2>&1 || true; "
+                    f"rm -f {pid_path}; "
+                    f"else "
+                    f"pkill -f '^dnsmasq --conf-file={active_conf_path}' >/dev/null 2>&1 || true; "
+                    f"fi"  )                                                                      #NEW LINE PAMODI
+    
         for ap_id, ap in sorted(current.access_points.items()):
             conf_path = f"var/lib/forwarder/rendered/{revision}/hostapd/{ap_id}.conf"
             plan.files[conf_path] = self._hostapd_config(ap)

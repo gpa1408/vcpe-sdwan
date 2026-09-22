@@ -16,8 +16,8 @@
   contact
     "Author: Pamodi Ranathunga";
   description
-    "YANG model for an SD-WAN CPE supporting underlay WAN links, LAN services, WireGuard-based overlays, traffic classification,
-     policy-based steering, firewall configuration, forwarder-facing path objects, path groups, NAT services, static routing, and
+    "YANG model for SD-WAN CPE supporting underlay WAN links, LAN services, WireGuard-based overlays, traffic classification,
+     policy based steering, firewall configuration, forwarder facing path objects, path groups, NAT services, static routing, and
      operational state reporting.";
 
   revision 2026-05-12 {
@@ -401,6 +401,13 @@
           mandatory true;
           description
             "Tunnel name on the remote CPE. The controller uses remote-cpe-id and remote-tunnel-name to find the matching tunnel in the peer CPE datastore.";
+        }
+
+        leaf-list advertised-prefix {
+            type inet:ip-prefix;
+            description
+              "Local prefixes advertised to the remote CPE and installed
+               as AllowedIPs on the remote WireGuard peer.";
         }
 
         container resolved-peer {
