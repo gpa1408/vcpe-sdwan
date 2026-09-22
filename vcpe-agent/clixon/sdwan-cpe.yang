@@ -403,6 +403,13 @@
             "Tunnel name on the remote CPE. The controller uses remote-cpe-id and remote-tunnel-name to find the matching tunnel in the peer CPE datastore.";
         }
 
+        leaf-list advertised-prefix {
+            type inet:ip-prefix;
+            description
+              "Local prefixes advertised to the remote CPE and installed
+               as AllowedIPs on the remote WireGuard peer.";
+        }
+
         container resolved-peer {
           leaf peer-address {
             type inet:ipv4-address;
