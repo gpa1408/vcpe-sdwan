@@ -151,8 +151,26 @@
         description
           "Management IP address of this CPE.";
       }
+      leaf controller-ip {
+        type inet:ipv4-address;
+        description
+          "IPv4 address of the SD-WAN controller.";
+      }
+  
+      leaf controller-port {
+        type inet:port-number;
+        default "9000";
+        description
+          "HTTP port used by the SD-WAN controller announcement API.";
+      }
+  
+      leaf controller-ip {
+        type inet:ipv4-address;
+        default "192.168.x.x";
+        description
+          "IPv4 address of the SD-WAN controller.";
+      }
     }
-    
     /*
      * ==================================================================================
      * CPE Interface roles
