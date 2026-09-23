@@ -32,7 +32,6 @@ class Agent:
         self.wan_last_ipv4 = {}                                                       # last observed WAN IPv4, used to detect DHCP/ static IP changes
         self.flow_id_fwmarks = {}                                                     # stores generated fwmark to use for monitoring flow id
         self.forwarder_base_url = "http://host.docker.internal:9090"                  # fixed forwarder API URL used by the agent
-        self.controller_base_url = "http://<controller-ip>:9000"                      # controller API used for CPE announcements
         self.forwarder_dry_run = False                                                # If forwarder is not ready yet,a dry-run "true" (false send real API calls)
 
     # =====================================================================================
@@ -215,51 +214,50 @@ class Agent:
     # =====================================================================================
     # Controller Annoucements
     # =====================================================================================
-    def _announce_to_controller(self, reason=None, wan_name=None):
+    def _announce_to_controller(self):
         try:
-            current_config = self.config_reader.get_intended_config()             # read current CPE configuration from YANG datastore
+            current_config = self.config_reader.get_intended_config()                     # read system parameters from local YANG datastore
+            system = current_config.get("system", {})                                     # get CPE system configuration
     
-            system = current_config.get("system", {})                             # read system information
-    
-            hostname = system.get("hostname")                                     # obtain CPE hostname from datastore
-            management_ip = system.get("management-ip")                           # obtain controller-reachable CPE management IP
+            hostname = system.get("hostname")                                             # CPE hostname sent during registration
+            management_ip = system.get("management-ip")                                   # address controller uses to reach this CPE
+            controller_ip = system.get("controller-ip")                                   # preconfigured controller address
+            controller_port = system.get("controller-port")                               # preconfigured controller HTTP port
     
             if not hostname or not management_ip:
-                logging.warning(
-                    "Cannot announce to controller because hostname or management IP is missing"
-                )
-                return
+                logging.warning("Cannot register CPE: hostname or management-ip is missing")
+                return False
+    
+            if not controller_ip or not controller_port:
+                logging.warning("Cannot register CPE: controller-ip or controller-port is missing")
+                return False
     
             payload = {
                 "hostname": hostname,
                 "management-ip": management_ip
-            }                                                                      # fields required by current controller /announce API
+            }                                                                              # exact JSON currently expected by controller
     
-            if reason:
-                payload["reason"] = reason                                         # optional event information
-    
-            if wan_name:
-                payload["wan-link"] = wan_name                                     # optional affected WAN link
+            url = f"http://{controller_ip}:{controller_port}/announce"                     # build controller registration endpoint from YANG
     
             response = requests.post(
-                f"{self.controller_base_url}/announce",
+                url,
                 json=payload,
                 timeout=5
-            )
+            )                                                                              # send initial CPE registration
     
-            response.raise_for_status()
+            response.raise_for_status()                                                    # controller should respond HTTP 200
     
             logging.info(
-                "Controller announcement sent: reason=%s wan=%s",
-                reason,
-                wan_name
+                "CPE registration successful: hostname=%s management-ip=%s",
+                hostname,
+                management_ip
             )
     
+            return True
+    
         except Exception as e:
-            logging.warning(
-                "Failed to announce CPE to controller: %s",
-                e
-            )
+            logging.warning("CPE registration with controller failed: %s", e)
+            return False
     # =====================================================================================
     # Publish operations data in Datastore
     # =====================================================================================
@@ -515,6 +513,7 @@ class Agent:
             
         self._sync_fwmarks_from_forwarder()                                             # recover existing fwmarks from forwarder after router/agent reboot (only once)
         self.discover_nat_for_all_wans()                                                # initial NAT discovery for all WANs
+        self._announce_to_controller()                                                  # send one initial CPE registration to controller
         self.run_forever(interval_sec=interval_sec)
         
     # =====================================================================================
