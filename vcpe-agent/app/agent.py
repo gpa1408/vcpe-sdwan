@@ -349,19 +349,6 @@ class Agent:
 
     def discover_nat_for_all_wans(self):
         current_config = self.config_reader.get_intended_config()                 # read all configured WAN links
-        
-        if interface_state.get("ipv4-address"):
-            current_ipv4 = interface_state.get("ipv4-address")                       # read startup WAN IP
-        
-            self.wan_last_ipv4[wan_name] = current_ipv4                              # establish initial IP baseline
-        
-            self.detect_nat_type(
-                wan_name,
-                interface_name,
-                role
-            )                                                                         # initial NAT discovery
-
-    break
     
         wan_links = self._as_list(
             current_config.get("interfaces", {})
@@ -377,27 +364,34 @@ class Agent:
     
             if not wan_name or not interface_name:
                 continue                                                          # skip incomplete configuration
-            
+    
             if admin_enabled is False:
                 continue                                                          # skip disabled WAN
-            
+    
             if role == "ipvpn":
                 self.wan_nat_types.pop(wan_name, None)                            # NAT discovery is not required for IP-VPN WAN
                 continue
-            
-            for _ in range(15):
-                interface_state = self._get_forwarder_interface_state(interface_name)  # wait until WAN gets usable IP
     
-                if interface_state.get("ipv4-address"):
+            for _ in range(15):
+                interface_state = self._get_forwarder_interface_state(
+                    interface_name
+                )                                                                 # wait until WAN gets usable IP
+    
+                current_ipv4 = interface_state.get("ipv4-address")
+    
+                if current_ipv4:
+                    self.wan_last_ipv4[wan_name] = current_ipv4                  # establish initial IP baseline
+    
                     self.detect_nat_type(
                         wan_name,
                         interface_name,
                         role
-                    )                                                             # run NAT discovery for this WAN
+                    )                                                             # initial NAT discovery
+    
                     break
     
                 time.sleep(2)                                                     # DHCP may still be running
-
+            
     def check_wan_ip_changes(self):
         current_config = self.config_reader.get_intended_config()                 # read current WAN configuration
     
@@ -411,21 +405,29 @@ class Agent:
             wan_name = wan.get("name")                                            # logical WAN name
             interface_name = wan.get("interface-name")                            # Linux interface
             role = wan.get("role")                                                # broadband/fiber/lte/ipvpn
+            admin_enabled = self._bool_value(wan.get("admin-enabled"))            # configured administrative state
     
             if not wan_name or not interface_name:
                 continue                                                          # skip incomplete WAN
     
-            interface_state = self._get_forwarder_interface_state(interface_name) # read live interface state
-            current_ipv4 = interface_state.get("ipv4-address")                    # current WAN IP
-            previous_ipv4 = self.wan_last_ipv4.get(wan_name)                      # previously observed WAN IP
+            if admin_enabled is False:
+                continue                                                          # skip disabled WAN
+    
+            if role == "ipvpn":
+                continue                                                          # NAT discovery is not required for IP-VPN WAN
+    
+            interface_state = self._get_forwarder_interface_state(interface_name) # read live Forwarder state
+            current_ipv4 = interface_state.get("ipv4-address")                    # current effective WAN IP
+            previous_ipv4 = self.wan_last_ipv4.get(wan_name)                      # last observed WAN IP
     
             if current_ipv4 == previous_ipv4:
-                continue                                                          # no IP change
+                continue                                                          # nothing changed
     
-            self.wan_last_ipv4[wan_name] = current_ipv4                           # remember latest IP
+            self.wan_last_ipv4[wan_name] = current_ipv4                           # remember latest state
     
-            if previous_ipv4 is None or current_ipv4 is None:
-                continue                                                          # initial observation/address loss is not a replacement event
+            if current_ipv4 is None:
+                self.wan_nat_types.pop(wan_name, None)                            # old NAT result is no longer valid
+                continue                                                          # wait until WAN receives an address again
     
             logging.info(
                 "WAN IPv4 changed: wan=%s old=%s new=%s",
@@ -438,10 +440,10 @@ class Agent:
                 wan_name,
                 interface_name,
                 role
-            )                                                                      # rerun NAT discovery for changed WAN
+            )                                                                      # rediscover NAT for the new WAN address
     
-            self._announce_to_controller()                                        # trigger controller reconciliation
-
+            self._announce_to_controller()                                        # trigger controller tunnel reconciliation
+        
     def build_operational_state_xml(self):
         current_config = self.config_reader.get_intended_config()                         # read current YANG configuration
     
