@@ -215,18 +215,37 @@ class Agent:
     # =====================================================================================
     # Controller Annoucements
     # =====================================================================================
-    def _announce_to_controller(self, reason, wan_name=None):
+    def _announce_to_controller(self, reason=None, wan_name=None):
         try:
+            current_config = self.config_reader.get_intended_config()             # read current CPE configuration from YANG datastore
+    
+            system = current_config.get("system", {})                             # read system information
+    
+            hostname = system.get("hostname")                                     # obtain CPE hostname from datastore
+            management_ip = system.get("management-ip")                           # obtain controller-reachable CPE management IP
+    
+            if not hostname or not management_ip:
+                logging.warning(
+                    "Cannot announce to controller because hostname or management IP is missing"
+                )
+                return
+    
             payload = {
-                "reason": reason,
-                "wan-link": wan_name
-            }                                                                      # tell controller why the CPE is announcing
+                "hostname": hostname,
+                "management-ip": management_ip
+            }                                                                      # fields required by current controller /announce API
+    
+            if reason:
+                payload["reason"] = reason                                         # optional event information
+    
+            if wan_name:
+                payload["wan-link"] = wan_name                                     # optional affected WAN link
     
             response = requests.post(
                 f"{self.controller_base_url}/announce",
                 json=payload,
                 timeout=5
-            )                                                                      # notify controller that CPE state should be refreshed
+            )
     
             response.raise_for_status()
     
@@ -238,7 +257,7 @@ class Agent:
     
         except Exception as e:
             logging.warning(
-                "Failed to announce state change to controller: %s",
+                "Failed to announce CPE to controller: %s",
                 e
             )
     # =====================================================================================
