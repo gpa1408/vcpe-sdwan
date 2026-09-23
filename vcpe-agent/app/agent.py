@@ -8,15 +8,16 @@ import os
 import base64
 import xml.etree.ElementTree as ET                                                    # to parse XML transaction messages sent by Clixon callback plugin
 import threading
+import ipaddress
 
 from http.server import BaseHTTPRequestHandler, HTTPServer                            # internal HTTP server for receiving Clixon callback messages
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives import serialization
+from xml.sax.saxutils import escape
 
 from config_reader import ConfigReader
 from monitoring_manager import MonitoringManager  
 from metric_reader import MetricReader                  
-#from state_writer import StateWriter                    #REMOVE COMMENT      
 
 logging.basicConfig(level=logging.INFO)                                               # to show info messages and errors
 
@@ -25,9 +26,10 @@ class Agent:
         self.config_reader = ConfigReader()
         self.monitoring_manager = MonitoringManager(dry_run=True)    
         self.metric_reader = MetricReader()          
-        #self.state_writer = StateWriter()                #REMOVE COMMENT
         
         self.generated_tunnel_keys = {}                                               # stores generated WireGuard keys during the current agent runtime
+        self.wan_nat_types = {}                                                       # latest discovered NAT type for each WAN link
+        self.wan_last_ipv4 = {}                                                       # last observed WAN IPv4, used to detect DHCP/ static IP changes
         self.flow_id_fwmarks = {}                                                     # stores generated fwmark to use for monitoring flow id
         self.forwarder_base_url = "http://host.docker.internal:9090"                  # fixed forwarder API URL used by the agent
         self.forwarder_dry_run = False                                                # If forwarder is not ready yet,a dry-run "true" (false send real API calls)
@@ -167,64 +169,171 @@ class Agent:
         except Exception as e:
             logging.exception("Failed to get or create WireGuard keys for tunnel %s: %s", tunnel_name, e)
             return None, None, None
+    
+    def _get_forwarder_interface_state(self, interface_name):
+        try:
+            url = f"{self.forwarder_base_url}/api/v1/interfaces/{interface_name}"  # Forwarder interface state endpoint
+    
+            response = requests.get( url, headers={"Accept": "application/json"}, timeout=5)                                                                     # ask Forwarder for current Linux interface state
+    
+            response.raise_for_status()                               
+            data = response.json()                                                # Forwarder Interface object
+    
+            ipv4_address = None                                                   # default when no address
+    
+            for address in data.get("addresses", []):                             
+                try:
+                    interface = ipaddress.ip_interface(address)                   # parse address such as 192.168.122.169/24
+    
+                    if interface.version == 4:                                    # YANG leaf currently expects IPv4
+                        ipv4_address = str(interface.ip)                           # remove prefix and keep only 192.168.122.169
+                        break
+    
+                except ValueError:
+                    continue                                                     
+    
+            forwarder_oper_state = data.get("oper_state", "unknown")              # read actual runtime link state
+    
+            if forwarder_oper_state == "up":
+                oper_status = "up"                                             
+            else:
+                oper_status = "down"                                             
+    
+            return {
+                "ipv4-address": ipv4_address,                                     # dynamically learned/static IPv4
+                "oper-status": oper_status                                        # current operational status
+            }
+    
+        except Exception as e:
+            logging.warning("Failed to read interface state for %s from Forwarder: %s", interface_name,e)
+    
+            return {
+                "ipv4-address": None,                                             # do not expose stale IP on failure
+                "oper-status": "down"                                             # failed state lookup is treated as unavailable
+            }
 
     # =====================================================================================
     # Publish operations data in Datastore
     # =====================================================================================
-    def detect_and_store_nat_type(self, wan_name, interface_name, role):
-        if role != "ipvpn" and wan_name and interface_name:
-            if self.forwarder_dry_run:                                                   # in dry-run mode, only print the transaction without calling forwarder
-                logging.info("Dry-run: NAT detection skipped for WAN link %s", wan_name)
-                return None
+    def detect_nat_type(self, wan_name, interface_name, role):
+        if role == "ipvpn":                                                       # NAT discovery is not needed for IP-VPN links
+            self.wan_nat_types.pop(wan_name, None)                                # remove any old NAT result
+            return None
+    
+        if not wan_name or not interface_name:                                    # both identifiers are required
+            return None
+    
+        try:
+            interface_state = self._get_forwarder_interface_state(interface_name) # read current live interface state
+            ipv4_address = interface_state.get("ipv4-address")                    # get current WAN IPv4
+    
+            if not ipv4_address:
+                logging.info(
+                    "Skipping NAT discovery for WAN %s because interface %s has no IPv4 address yet",
+                    wan_name,
+                    interface_name
+                )
+                return None                                                       # NAT discovery must wait until WAN has an address
+    
+            url = (
+                f"{self.forwarder_base_url}"
+                f"/api/v1/interfaces/{interface_name}/nat-discovery"
+            )                                                                     # Forwarder NAT discovery endpoint
+    
+            response = requests.post(
+                url,
+                json={},
+                timeout=10
+            )                                                                     # start asynchronous NAT discovery
+    
+            response.raise_for_status()                                           # raise error on HTTP failure
+    
+            task_id = response.json().get("task_id")                              # get NAT discovery task identifier
+    
+            if not task_id:
+                return None                                                       # cannot poll without task identifier
+    
+            result_url = (
+                f"{self.forwarder_base_url}"
+                f"/api/v1/interfaces/{interface_name}/nat-discovery/{task_id}"
+            )                                                                     # polling endpoint
+    
+            nat_type = None                                                       # NAT result not available yet
+    
+            for _ in range(5):
+                result = requests.get(
+                    result_url,
+                    headers={"Accept": "application/json"},
+                    timeout=10
+                )                                                                 # poll NAT discovery result
+    
+                result.raise_for_status()                                         # raise on HTTP failure
+                data = result.json()                                              # parse Forwarder response
+                status = data.get("status")                                       # running / completed / failed
+    
+                if status == "completed":
+                    nat_type = data.get("results", {}).get("nat_type")            # get final NAT type
+                    break
+    
+                if status == "failed":
+                    break                                                         # stop polling when discovery failed
+    
+                if status == "running":
+                    time.sleep(1)                                                 # wait before next poll
+    
+            if nat_type:
+                self.wan_nat_types[wan_name] = nat_type                           # update current runtime NAT state
+    
+                logging.info(
+                    "Updated NAT type=%s for WAN link=%s",
+                    nat_type,
+                    wan_name
+                )
+    
+            return nat_type
+    
+        except Exception as e:
+            logging.exception(
+                "NAT detection failed for WAN link %s: %s",
+                wan_name,
+                e
+            )
+    
+            return None
 
-            try:
-                url = f"{self.forwarder_base_url}/api/v1/interfaces/{interface_name}/nat-discovery" # OpenAPI NAT discovery endpoint is interface based
-                response = requests.post(url, json={}, timeout=10)
-                response.raise_for_status()                                              # raises an error if the forwarder returns a failed HTTP status
-
-                task_id = response.json().get("task_id")
-                if not task_id:
-                    return None
-
-                result_url = f"{self.forwarder_base_url}/api/v1/interfaces/{interface_name}/nat-discovery/{task_id}"
-                nat_type = None
-
-                for _ in range(5):                                                       # small polling loop for the asynchronous NAT discovery task
-                    result = requests.get(result_url, headers={"Accept": "application/json"}, timeout=10)
-                    result.raise_for_status()
-                    data = result.json()                                                 # parse response body                 
-                
-                    status = data.get("status")                                         
-                
-                    if status == "completed":                                            
-                        nat_type = data.get("results", {}).get("nat_type")             
-                        break                                                            # stop polling
-                
-                    if status == "failed":                                              
-                        logging.warning("NAT discovery failed for wan-link=%s", wan_name) 
-                        return None                                                      # stop NAT discovery
-                
-                    if status == "running":                                              # NAT discovery is still not finished
-                        time.sleep(1)                                                    # wait before next polling attempt
-                        continue                                                         # poll again
-
-                if not nat_type:
-                    return None
-
-                state_dir = "/var/lib/clixon/wan-link-nat-types"                         # state plugin can read this directory to publish config false nat-type
-                os.makedirs(state_dir, exist_ok=True)
-
-                with open(f"{state_dir}/{wan_name}.nat", "w") as f:                      # one runtime state file is stored per WAN link
-                    f.write(nat_type)
-
-                logging.info("Stored nat-type=%s for wan-link=%s", nat_type, wan_name)
-                return nat_type
-
-            except Exception as e:
-                logging.exception("NAT detection failed for WAN link %s: %s", wan_name, e)
-                return None
-
-        return None
+    def discover_nat_for_all_wans(self):
+        current_config = self.config_reader.get_intended_config()                 # read all configured WAN links
+    
+        wan_links = self._as_list(
+            current_config.get("interfaces", {})
+                          .get("underlay", {})
+                          .get("wan-link", [])
+        )                                                                         # extract WAN-link list
+    
+        for wan in wan_links:
+            wan_name = wan.get("name")                                            # example: UPL1
+            interface_name = wan.get("interface-name")                            # example: ens7
+            role = wan.get("role")                                                # example: fiber
+            admin_enabled = self._bool_value(wan.get("admin-enabled"))            # check configured WAN state
+    
+            if not wan_name or not interface_name:
+                continue                                                          # skip incomplete configuration
+    
+            if admin_enabled is False:
+                continue                                                          # skip disabled WAN
+    
+            for _ in range(15):
+                interface_state = self._get_forwarder_interface_state(interface_name)  # wait until WAN gets usable IP
+    
+                if interface_state.get("ipv4-address"):
+                    self.detect_nat_type(
+                        wan_name,
+                        interface_name,
+                        role
+                    )                                                             # run NAT discovery for this WAN
+                    break
+    
+                time.sleep(2)                                                     # DHCP may still be running
     # =====================================================================================
     # Check RESTCONF Server status before running Steering Loop
     # =====================================================================================
@@ -246,8 +355,11 @@ class Agent:
     def run_steering_loop_after_restconf_ready(self, interval_sec=10):
         if not self.wait_for_restconf():                                                # wait until Clixon RESTCONF is ready
             return                                                                      # stop startup if RESTCONF is not ready
+            
         self._sync_fwmarks_from_forwarder()                                             # recover existing fwmarks from forwarder after router/agent reboot (only once)
+        self.discover_nat_for_all_wans()                                                # initial NAT discovery for all WANs
         self.run_forever(interval_sec=interval_sec)
+        
     # =====================================================================================
     # Forwarder API helpers
     # =====================================================================================
