@@ -131,44 +131,43 @@
      */
     container system {
       description
-        "Local CPE system identity and management information.";
+        "Local CPE system identity and management information";
 
       leaf local-cpe-id {
         type cpe-id;
-        mandatory true;
         description
-          "Unique identifier of this CPE";
+          "Unique identifier assigned to this CPE by the SD-WAN controller after registration";
       }
 
       leaf hostname {
         type string;
         description
-          "Hostname of this CPE.";
+          "Hostname of this CPE";
       }
 
       leaf management-ip {
         type inet:ipv4-address;
         description
-          "Management IP address of this CPE.";
+          "Management IP address of this CPE";
       }
       leaf controller-ip {
         type inet:ipv4-address;
         description
-          "IPv4 address of the SD-WAN controller.";
+          "IPv4 address of the SD-WAN controller";
       }
   
       leaf controller-port {
         type inet:port-number;
         default "9000";
         description
-          "HTTP port used by the SD-WAN controller announcement API.";
+          "HTTP port used by the SD-WAN controller announcement API";
       }
   
       leaf controller-ip {
         type inet:ipv4-address;
         default "192.168.x.x";
         description
-          "IPv4 address of the SD-WAN controller.";
+          "IPv4 address of the SD-WAN controller";
       }
     }
     /*
