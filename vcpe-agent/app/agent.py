@@ -32,6 +32,7 @@ class Agent:
         self.wan_last_ipv4 = {}                                                       # last observed WAN IPv4, used to detect DHCP/ static IP changes
         self.flow_id_fwmarks = {}                                                     # stores generated fwmark to use for monitoring flow id
         self.forwarder_base_url = "http://host.docker.internal:9090"                  # fixed forwarder API URL used by the agent
+        self.controller_base_url = "http://<controller-ip>:9000"                      # controller API used for CPE announcements
         self.forwarder_dry_run = False                                                # If forwarder is not ready yet,a dry-run "true" (false send real API calls)
 
     # =====================================================================================
@@ -211,7 +212,35 @@ class Agent:
                 "ipv4-address": None,                                             # do not expose stale IP on failure
                 "oper-status": "down"                                             # failed state lookup is treated as unavailable
             }
-
+    # =====================================================================================
+    # Controller Annoucements
+    # =====================================================================================
+    def _announce_to_controller(self, reason, wan_name=None):
+        try:
+            payload = {
+                "reason": reason,
+                "wan-link": wan_name
+            }                                                                      # tell controller why the CPE is announcing
+    
+            response = requests.post(
+                f"{self.controller_base_url}/announce",
+                json=payload,
+                timeout=5
+            )                                                                      # notify controller that CPE state should be refreshed
+    
+            response.raise_for_status()
+    
+            logging.info(
+                "Controller announcement sent: reason=%s wan=%s",
+                reason,
+                wan_name
+            )
+    
+        except Exception as e:
+            logging.warning(
+                "Failed to announce state change to controller: %s",
+                e
+            )
     # =====================================================================================
     # Publish operations data in Datastore
     # =====================================================================================
@@ -318,10 +347,14 @@ class Agent:
     
             if not wan_name or not interface_name:
                 continue                                                          # skip incomplete configuration
-    
+            
             if admin_enabled is False:
                 continue                                                          # skip disabled WAN
-    
+            
+            if role == "ipvpn":
+                self.wan_nat_types.pop(wan_name, None)                            # NAT discovery is not required for IP-VPN WAN
+                continue
+            
             for _ in range(15):
                 interface_state = self._get_forwarder_interface_state(interface_name)  # wait until WAN gets usable IP
     
@@ -1175,19 +1208,8 @@ class Agent:
             if object_type in ["class", "tunnel"]:                                     
                 monitoring_start_candidates.append({                                         # if traffic class or tunnel changed, schedule monitoring start/update
                     "object_type": object_type,                                        
-                    "parent_dict": parent_dict                                               # object data
-                })
-
-            if object_type == "wan-link":                                                    # WAN changes may require NAT detection after commit
-                if self._has_change(
-                    changed_leafs,
-                    "interface-name",
-                    "role",
-                    "address-mode",
-                    "static-address",
-                    "static-gateway",
-                    "admin-enabled"):
-                    nat_detection_candidates.append(parent_dict)                            #store this WAN object for NAT detection after commit
+                    "parent_dict": parent_dict     })                                             # object data
+             
 
         added = root.find("added")                                                      # contains newly added datastore objects
         
@@ -1207,6 +1229,9 @@ class Agent:
                         monitoring_start_candidates.append({
                             "object_type": object_type,
                             "parent_dict": parent_dict })
+
+                    if object_type == "wan-link":
+                        nat_detection_candidates.append(parent_dict)                          # run NAT discovery for newly added WAN
                             
         deleted = root.find("deleted")                                                      # contains deleted datastore objects (normally delete=False, but when clixon reports delete->delete=True)
         
@@ -1239,10 +1264,10 @@ class Agent:
 
         if phase == "commit":                                                              # NAT detection is triggered only after the config is committed
             for wan in nat_detection_candidates:
-                self.detect_and_store_nat_type(
+                self.detect_nat_type(
                     wan.get("name"),
                     wan.get("interface-name"),
-                    wan.get("role"))
+                    wan.get("role"))                                                       # rediscover NAT only for the changed WAN
 
             for item in monitoring_start_candidates:                                        # start/update monitoring only after real commit
                 self._start_monitoring_for_object(                              
