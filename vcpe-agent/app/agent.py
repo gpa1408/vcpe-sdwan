@@ -334,6 +334,111 @@ class Agent:
                     break
     
                 time.sleep(2)                                                     # DHCP may still be running
+
+    def build_operational_state_xml(self):
+        current_config = self.config_reader.get_intended_config()                         # read current YANG configuration
+    
+        xml_parts = [
+            '<sdwan xmlns="urn:sdwan:cpe">'
+        ]                                                                                 # start top-level sdwan tree
+    
+        # =================================================================================
+        # Tunnel operational information
+        # =================================================================================
+    
+        tunnels = self._as_list(
+            current_config.get("overlay", {}).get("tunnel", [])
+        )                                                                                 # get configured WireGuard tunnels
+    
+        if tunnels:
+            xml_parts.append("<overlay>")                                                  # open overlay container
+    
+            for tunnel in tunnels:
+                tunnel_name = tunnel.get("name")                                          # example: wg01
+    
+                if not tunnel_name:
+                    continue                                                              # skip invalid tunnel objects
+    
+                key_data = self.generated_tunnel_keys.get(tunnel_name, {})                 # check currently loaded WireGuard keys
+                public_key = key_data.get("public-key")                                    # read local public key
+    
+                if not public_key:
+                    private_key, public_key, private_path = \
+                        self._generate_wireguard_tunnel_keys(tunnel_name)                  # recover existing keys or generate them
+    
+                    if private_key and public_key:
+                        self.generated_tunnel_keys[tunnel_name] = {
+                            "private-key": private_key,
+                            "public-key": public_key,
+                            "private-path": private_path
+                        }                                                                  # restore key information into runtime memory
+    
+                if not public_key:
+                    continue                                                              # skip if key is unavailable
+    
+                xml_parts.append("<tunnel>")                                               # open tunnel list entry
+                xml_parts.append(
+                    f"<name>{escape(tunnel_name)}</name>"
+                )                                                                          # tunnel list key
+                xml_parts.append(
+                    f"<local-public-key>{escape(public_key)}</local-public-key>"
+                )                                                                          # config false local WireGuard public key
+                xml_parts.append("</tunnel>")                                              # close tunnel entry
+    
+            xml_parts.append("</overlay>")                                                 # close overlay container
+    
+        # =================================================================================
+        # WAN operational information
+        # =================================================================================
+    
+        xml_parts.append("<state>")                                                        # open config false operational-state container
+    
+        wan_links = self._as_list(
+            current_config.get("interfaces", {})
+                          .get("underlay", {})
+                          .get("wan-link", [])
+        )                                                                                  # read configured WAN links
+    
+        for wan in wan_links:
+            wan_name = wan.get("name")                                                     # example: UPL1
+            interface_name = wan.get("interface-name")                                     # example: ens7
+    
+            if not wan_name or not interface_name:
+                continue                                                                  # skip incomplete WAN object
+    
+            interface_state = self._get_forwarder_interface_state(interface_name)          # get live state from Forwarder
+    
+            ipv4_address = interface_state.get("ipv4-address")                             # current DHCP/static IPv4
+            oper_status = interface_state.get("oper-status")                               # current interface operational state
+            nat_type = self.wan_nat_types.get(wan_name)                                    # most recently discovered NAT type
+    
+            xml_parts.append("<wan-link-state>")                                           # create WAN operational-state list entry
+            xml_parts.append(
+                f"<name>{escape(wan_name)}</name>"
+            )                                                                              # mandatory wan-link-state key
+    
+            if oper_status:
+                xml_parts.append(
+                    f"<oper-status>{escape(oper_status)}</oper-status>"
+                )                                                                          # expose current WAN status
+    
+            if ipv4_address:
+                xml_parts.append(
+                    f"<ipv4-address>{escape(ipv4_address)}</ipv4-address>"
+                )                                                                          # expose current effective WAN IPv4
+    
+            if nat_type:
+                xml_parts.append(
+                    f"<nat-type>{escape(nat_type)}</nat-type>"
+                )                                                                          # expose latest runtime NAT discovery result
+    
+            xml_parts.append("</wan-link-state>")                                          # close WAN operational-state entry
+    
+        xml_parts.append("</state>")                                                       # close operational-state container
+        xml_parts.append("</sdwan>")                                                       # close top-level YANG container
+    
+        return "".join(xml_parts)                                                          # return complete XML to internal state API
+        
     # =====================================================================================
     # Check RESTCONF Server status before running Steering Loop
     # =====================================================================================
@@ -1543,6 +1648,45 @@ class Agent:
 
 class ClixonCallbackHandler(BaseHTTPRequestHandler):
     agent = None
+
+    def do_GET(self):
+        try:
+            if self.path != "/internal/operational-state":
+                self.send_response(404)                                                   # reject unknown internal GET endpoints
+                self.end_headers()
+                return
+    
+            xml_body = self.agent.build_operational_state_xml()                            # build current operational-state XML
+    
+            encoded_body = xml_body.encode("utf-8")                                        # convert XML into HTTP response bytes
+    
+            self.send_response(200)                                                     
+            self.send_header(
+                "Content-Type",
+                "application/yang-data+xml"
+            )                                                                              # response contains YANG XML
+            self.send_header(
+                "Content-Length",
+                str(len(encoded_body))
+            )                                                                              # send correct HTTP body length
+            self.end_headers()
+    
+            self.wfile.write(encoded_body)                                                 # return state XML to Clixon state plugin
+    
+        except Exception as e:
+            logging.exception("Operational state request failed: %s",e)                                                                          
+    
+            error_body = json.dumps({
+                "status": "error",
+                "reason": str(e)
+            }).encode("utf-8")                                                             # construct internal error response
+    
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(error_body)))
+            self.end_headers()
+    
+            self.wfile.write(error_body)                                                   # return error to state plugin
 
     def do_POST(self):
         try:
