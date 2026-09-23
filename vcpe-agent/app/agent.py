@@ -349,6 +349,19 @@ class Agent:
 
     def discover_nat_for_all_wans(self):
         current_config = self.config_reader.get_intended_config()                 # read all configured WAN links
+        
+        if interface_state.get("ipv4-address"):
+            current_ipv4 = interface_state.get("ipv4-address")                       # read startup WAN IP
+        
+            self.wan_last_ipv4[wan_name] = current_ipv4                              # establish initial IP baseline
+        
+            self.detect_nat_type(
+                wan_name,
+                interface_name,
+                role
+            )                                                                         # initial NAT discovery
+
+    break
     
         wan_links = self._as_list(
             current_config.get("interfaces", {})
@@ -384,6 +397,50 @@ class Agent:
                     break
     
                 time.sleep(2)                                                     # DHCP may still be running
+
+    def check_wan_ip_changes(self):
+        current_config = self.config_reader.get_intended_config()                 # read current WAN configuration
+    
+        wan_links = self._as_list(
+            current_config.get("interfaces", {})
+                          .get("underlay", {})
+                          .get("wan-link", [])
+        )                                                                         # get configured WAN links
+    
+        for wan in wan_links:
+            wan_name = wan.get("name")                                            # logical WAN name
+            interface_name = wan.get("interface-name")                            # Linux interface
+            role = wan.get("role")                                                # broadband/fiber/lte/ipvpn
+    
+            if not wan_name or not interface_name:
+                continue                                                          # skip incomplete WAN
+    
+            interface_state = self._get_forwarder_interface_state(interface_name) # read live interface state
+            current_ipv4 = interface_state.get("ipv4-address")                    # current WAN IP
+            previous_ipv4 = self.wan_last_ipv4.get(wan_name)                      # previously observed WAN IP
+    
+            if current_ipv4 == previous_ipv4:
+                continue                                                          # no IP change
+    
+            self.wan_last_ipv4[wan_name] = current_ipv4                           # remember latest IP
+    
+            if previous_ipv4 is None or current_ipv4 is None:
+                continue                                                          # initial observation/address loss is not a replacement event
+    
+            logging.info(
+                "WAN IPv4 changed: wan=%s old=%s new=%s",
+                wan_name,
+                previous_ipv4,
+                current_ipv4
+            )
+    
+            self.detect_nat_type(
+                wan_name,
+                interface_name,
+                role
+            )                                                                      # rerun NAT discovery for changed WAN
+    
+            self._announce_to_controller()                                        # trigger controller reconciliation
 
     def build_operational_state_xml(self):
         current_config = self.config_reader.get_intended_config()                         # read current YANG configuration
@@ -1570,6 +1627,8 @@ class Agent:
     # =====================================================================================
     def run_once(self):
         current_config = self.config_reader.get_intended_config()                           # read intended config from YANG datastore
+
+        self.check_wan_ip_changes()                                                         # detect changed WAN endpoint and notify controller
     
         if not hasattr(self, "metric_reader"):
             logging.warning("metric_reader not configured")
