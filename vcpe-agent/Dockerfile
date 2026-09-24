@@ -54,7 +54,7 @@ RUN mkdir -p /tmp/clixon-plugins && \
       /tmp/clixon_state_callback_plugin.c \
       -I/usr/local/include \
       -L/usr/local/lib \
-      -lclixon -lcligen
+      -lclixon -lcligen -lcurl
 
 
 FROM python:3.13-alpine3.21
