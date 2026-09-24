@@ -1,172 +1,166 @@
-#include <stdio.h>                                                         
-#include <string.h>                                                        
-#include <dirent.h>                                                        
-#include <limits.h>                                                         
+#include <stdio.h>                                                            // standard C functions
+#include <stdlib.h>                                                           // malloc(), realloc(), free()
+#include <string.h>                                                           // memcpy()
+#include <curl/curl.h>                                                        // HTTP GET to Agent
 
-#include <cligen/cligen.h>                                                  
-#include <clixon/clixon.h>                                               
+#include <cligen/cligen.h>                                                    // CLIgen definitions
+#include <clixon/clixon.h>                                                    // Clixon plugin API
 
-#define SDWAN_NS "urn:sdwan:cpe"                                           
-#define KEY_DIR  "/var/lib/clixon/local-public-keys"                        // directory where agent.py stores tunnel public keys
-#define NAT_DIR  "/var/lib/clixon/wan-link-nat-types"                       // directory where agent.py stores WAN NAT type state
+
+#define AGENT_STATE_URL "http://host.docker.internal:8080/internal/operational-state" // existing Agent state API
+
+
+typedef struct {
+    char *data;                                                               // HTTP response body
+    size_t size;                                                              // current response size
+} response_buffer;
+
+
+/* =====================================================================================
+ * Receive HTTP response from Agent
+ * ===================================================================================== */
+
+static size_t
+write_response(void *contents,
+               size_t size,
+               size_t nmemb,
+               void *userp)
+{
+    size_t bytes = size * nmemb;                                              // bytes received in this call
+    response_buffer *buffer = (response_buffer *)userp;                       // response buffer
+
+    char *new_data = realloc(buffer->data,
+                             buffer->size + bytes + 1);                        // enlarge response buffer
+
+    if (new_data == NULL)
+        return 0;                                                             // memory allocation failed
+
+    buffer->data = new_data;
+
+    memcpy(buffer->data + buffer->size,
+           contents,
+           bytes);                                                            // append received data
+
+    buffer->size += bytes;                                                     // update total size
+    buffer->data[buffer->size] = '\0';                                        // terminate XML string
+
+    return bytes;
+}
+
+
+/* =====================================================================================
+ * Get operational-state XML from Agent
+ * ===================================================================================== */
 
 static int
-read_file(const char *path, char *buf, size_t buflen)                       // read first line of a file into buf
+get_agent_state(char **xml)
 {
-    FILE *fp;
-    char *nl;
+    CURL *curl;
+    CURLcode result;
+    long http_code = 0;
 
-    fp = fopen(path, "r");                                                   // open file in read mode
-    if (fp == NULL)
+    response_buffer buffer = {NULL, 0};
+
+    buffer.data = malloc(1);                                                  // create empty buffer
+    if (buffer.data == NULL)
         return -1;
 
-    if (fgets(buf, buflen, fp) == NULL) {                                    // read one line from file
-        fclose(fp);
+    buffer.data[0] = '\0';
+
+    curl = curl_easy_init();                                                  // create HTTP request
+    if (curl == NULL) {
+        free(buffer.data);
         return -1;
     }
 
-    fclose(fp);
+    curl_easy_setopt(curl,
+                     CURLOPT_URL,
+                     AGENT_STATE_URL);                                        // Agent operational-state endpoint
 
-    nl = strchr(buf, '\n');                                                  // remove newline if file contains one
-    if (nl)
-        *nl = '\0';
+    curl_easy_setopt(curl,
+                     CURLOPT_WRITEFUNCTION,
+                     write_response);                                         // receive Agent XML response
 
-    return 0;
-}
+    curl_easy_setopt(curl,
+                     CURLOPT_WRITEDATA,
+                     &buffer);                                                // store response here
 
-static int
-add_tunnel_public_keys(cxobj *xconfig)                                       // add tunnel local-public-key operational state
-{
-    DIR *dir;                                                               // directory pointer
-    struct dirent *entry;                                                   // each entry represents one file inside the directory
-    char filepath[PATH_MAX];                                                // full path to the .pub file
-    char tunnel_name[32];                                                  // tunnel name extracted from filename
-    char public_key[64];                                                   // public key read from file
-    char xmlbuf[2048];                                                      // XML string returned to Clixon
-    char *dot;                                                              // pointer used to find ".pub" in filename
+    curl_easy_setopt(curl,
+                     CURLOPT_TIMEOUT,
+                     5L);                                                     // do not wait indefinitely
 
-    dir = opendir(KEY_DIR);                                                  // open public-key directory
-    if (dir == NULL)
-        return 0;                                                            // no key directory yet; not an error
+    result = curl_easy_perform(curl);                                         // perform HTTP GET
 
-    while ((entry = readdir(dir)) != NULL) {                                 // loop through files in KEY_DIR
-        snprintf(tunnel_name, sizeof(tunnel_name), "%s", entry->d_name);     // copy filename into tunnel_name buffer
-
-        dot = strstr(tunnel_name, ".pub");                                   // check for .pub extension
-        if (dot == NULL)
-            continue;                                                        // skip non-.pub files
-
-        *dot = '\0';                                                         // remove .pub extension, leaving only tunnel name
-
-        snprintf(filepath, sizeof(filepath), "%s/%s", KEY_DIR, entry->d_name); // build full file path
-
-        if (read_file(filepath, public_key, sizeof(public_key)) < 0)          // read public key from file
-            continue;                                                        // if reading fails, skip this file
-
-        snprintf(xmlbuf, sizeof(xmlbuf),                                     // build XML operational data
-                 "<sdwan xmlns=\"%s\">"
-                   "<overlay>"
-                     "<tunnel>"
-                       "<name>%s</name>"
-                       "<local-public-key>%s</local-public-key>"             // config false operational leaf
-                     "</tunnel>"
-                   "</overlay>"
-                 "</sdwan>",
-                 SDWAN_NS,
-                 tunnel_name,
-                 public_key);
-
-        if (clixon_xml_parse_string(xmlbuf, YB_NONE, 0, &xconfig, 0) < 0) {  // pass XML string to Clixon
-            closedir(dir);
-            return -1;
-        }
+    if (result != CURLE_OK) {
+        curl_easy_cleanup(curl);
+        free(buffer.data);
+        return -1;
     }
 
-    closedir(dir);                                                           // close directory after processing all files
-    return 0;
-}
+    curl_easy_getinfo(curl,
+                      CURLINFO_RESPONSE_CODE,
+                      &http_code);                                            // get HTTP status code
 
-static int
-add_wan_nat_types(cxobj *xconfig)                                            // add WAN-link nat-type operational state
-{
-    DIR *dir;                                                               // directory pointer
-    struct dirent *entry;                                                   // each entry represents one file inside the directory
-    char filepath[PATH_MAX];                                                // full path to the .nat file
-    char wan_name[32];                                                     // WAN-link name extracted from filename
-    char nat_type[32];                                                      // NAT type read from file
-    char xmlbuf[2048];                                                      // XML string returned to Clixon
-    char *dot;                                                              // pointer used to find ".nat" in filename
+    curl_easy_cleanup(curl);
 
-    dir = opendir(NAT_DIR);                                                  // open NAT state directory
-    if (dir == NULL)
-        return 0;                                                            // no NAT directory yet; not an error
-
-    while ((entry = readdir(dir)) != NULL) {                                 // loop through files in NAT_DIR
-        snprintf(wan_name, sizeof(wan_name), "%s", entry->d_name);           // copy filename into wan_name buffer
-
-        dot = strstr(wan_name, ".nat");                                      // check for .nat extension
-        if (dot == NULL)
-            continue;                                                        // skip non-.nat files
-
-        *dot = '\0';                                                         // remove .nat extension, leaving only WAN-link name
-
-        snprintf(filepath, sizeof(filepath), "%s/%s", NAT_DIR, entry->d_name); // build full file path
-
-        if (read_file(filepath, nat_type, sizeof(nat_type)) < 0)             // read NAT type from file
-            continue;                                                        // if reading fails, skip this file
-
-        snprintf(xmlbuf, sizeof(xmlbuf),                                     // build XML operational data
-                 "<sdwan xmlns=\"%s\">"
-                   "<interfaces>"
-                     "<underlay>"
-                       "<wan-link>"
-                         "<name>%s</name>"
-                         "<nat-type>%s</nat-type>"                          // config false operational leaf
-                       "</wan-link>"
-                     "</underlay>"
-                   "</interfaces>"
-                 "</sdwan>",
-                 SDWAN_NS,
-                 wan_name,
-                 nat_type);
-
-        if (clixon_xml_parse_string(xmlbuf, YB_NONE, 0, &xconfig, 0) < 0) {  // pass XML string to Clixon
-            closedir(dir);
-            return -1;
-        }
+    if (http_code != 200) {                                                   // Agent must return HTTP 200
+        free(buffer.data);
+        return -1;
     }
 
-    closedir(dir);                                                           // close directory after processing all files
+    *xml = buffer.data;                                                        // return Agent XML to caller
+
     return 0;
 }
+
+
+/* =====================================================================================
+ * Clixon state callback
+ * ===================================================================================== */
 
 static int
-sdwan_cpe_statedata(clixon_handle h,                                         // h = Clixon handle
-                    cvec *nsc,                                               // nsc = namespace context
-                    char *xpath,                                             // xpath = requested XPath filter
-                    cxobj *xconfig)                                          // xconfig = XML tree where plugin adds state data
+sdwan_cpe_statedata(clixon_handle h,                                          // Clixon handle
+                    cvec *nsc,                                                // namespace context
+                    char *xpath,                                              // requested XPath
+                    cxobj *xconfig)                                           // tree where state is added
 {
+    char *xml = NULL;
 
-    if (add_tunnel_public_keys(xconfig) < 0)                                  // add tunnel local-public-key state
-        return -1;
+    if (get_agent_state(&xml) < 0)                                            // retrieve current state from Agent
+        return 0;                                                             // Agent unavailable -> return no state
 
-    if (add_wan_nat_types(xconfig) < 0)                                       // add WAN-link NAT type state
+    if (clixon_xml_parse_string(xml,
+                                YB_NONE,
+                                0,
+                                &xconfig,
+                                0) < 0) {                                     // add Agent XML into Clixon state tree
+        free(xml);
         return -1;
+    }
+
+    free(xml);                                                                // temporary HTTP response no longer needed
 
     return 0;
 }
+
+/* =====================================================================================
+ * Clixon plugin registration
+ * ===================================================================================== */
 
 static clixon_plugin_api api = {
-    "callback_plugin",                                                        // plugin name shown in Clixon/plugin logs
+    "callback_plugin",                                                        // plugin name
     NULL,                                                                     // init callback not used
     NULL,                                                                     // start callback not used
     NULL,                                                                     // exit callback not used
     NULL,                                                                     // extension callback not used
-    .ca_statedata = sdwan_cpe_statedata,                                      // register backend state callback
+    .ca_statedata = sdwan_cpe_statedata,                                      // operational-state callback
 };
 
+
 clixon_plugin_api *
-clixon_plugin_init(clixon_handle h)                                           // required entry function; Clixon looks for this name
+clixon_plugin_init(clixon_handle h)
 {
-    return &api;                                                              // return plugin API structure to Clixon
+    curl_global_init(CURL_GLOBAL_DEFAULT);                                    // initialize HTTP library
+
+    return &api;                                                              // register plugin with Clixon
 }
