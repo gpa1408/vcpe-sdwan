@@ -7,7 +7,7 @@
 #include <clixon/clixon.h>                                                    // Clixon plugin API
 
 
-#define AGENT_STATE_URL "http://host.docker.internal:8080/internal/operational-state" // existing Agent state API
+#define AGENT_STATE_URL "http://127.0.0.1:8080/internal/operational-state"      // Agent runs in same container as Clixon
 
 
 typedef struct {
