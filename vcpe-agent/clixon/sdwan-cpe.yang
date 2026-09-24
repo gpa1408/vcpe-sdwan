@@ -153,7 +153,7 @@
 
       leaf controller-ip {
         type inet:ipv4-address;
-        default "192.168.122.50";                    // To be replaced with the actual controller IP
+        default "192.168.122.200";                    // To be replaced with the actual controller IP
         description
           "IPv4 address of the SD-WAN controller";
       }
