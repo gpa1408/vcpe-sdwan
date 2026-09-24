@@ -25,7 +25,9 @@ class Agent:
     def __init__(self):
         self.config_reader = ConfigReader()
         self.monitoring_manager = MonitoringManager(dry_run=True)    
-        self.metric_reader = MetricReader()          
+        self.metric_reader = MetricReader()    
+        
+        self.current_config_cache = {}
         
         self.generated_tunnel_keys = {}                                               # stores generated WireGuard keys during the current agent runtime
         self.wan_nat_types = {}                                                       # latest discovered NAT type for each WAN link
@@ -445,7 +447,10 @@ class Agent:
             self._announce_to_controller()                                        # trigger controller tunnel reconciliation
         
     def build_operational_state_xml(self):
-        current_config = self.config_reader.get_intended_config()                         # read current YANG configuration
+        current_config = self.current_config_cache                                        # use cached config to avoid recursive RESTCONF call
+
+        if not current_config:
+            return '<sdwan xmlns="urn:sdwan:cpe"/>'
     
         xml_parts = [
             '<sdwan xmlns="urn:sdwan:cpe">'
@@ -569,6 +574,8 @@ class Agent:
     def run_steering_loop_after_restconf_ready(self, interval_sec=10):
         if not self.wait_for_restconf():                                                # wait until Clixon RESTCONF is ready
             return                                                                      # stop startup if RESTCONF is not ready
+
+        self.current_config_cache = self.config_reader.get_intended_config()            # populate cache once at startup
             
         self._sync_fwmarks_from_forwarder()                                             # recover existing fwmarks from forwarder after router/agent reboot (only once)
         self.discover_nat_for_all_wans()                                                # initial NAT discovery for all WANs
@@ -1629,6 +1636,7 @@ class Agent:
     # =====================================================================================
     def run_once(self):
         current_config = self.config_reader.get_intended_config()                           # read intended config from YANG datastore
+        self.current_config_cache = current_config
 
         self.check_wan_ip_changes()                                                         # detect changed WAN endpoint and notify controller
     
