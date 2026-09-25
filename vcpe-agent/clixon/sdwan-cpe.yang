@@ -147,6 +147,7 @@
 
       leaf management-ip {
         type inet:ipv4-address;
+        default "192.168.122.167";                     // To be assigned my controller later
         description
           "Management IP address of this CPE";
       }
