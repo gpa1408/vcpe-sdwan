@@ -1090,7 +1090,7 @@ class Agent:
                     logging.warning("Cannot start monitoring: traffic class has no name")   # log missing class name
                     return                                                                 # stop this monitoring action
     
-                current_config = self.config_reader.get_intended_config()                  # read full current YANG datastore config
+                current_config = self.current_config_cache          
                 policies = current_config.get("policy", {}).get("steering", [])           # read steering policies
     
                 for policy in self._as_list(policies):                                     # loop through steering policies
@@ -1165,7 +1165,7 @@ class Agent:
                 if flow_id is None:                                                                 # if forwarder has not returned fwmark yet
                     flow_id = self._assign_temporary_fake_fwmark(class_name)                        # use temporary fake fwmark
             
-                current_config = self.config_reader.get_intended_config()                           # read current datastore config
+                current_config = self.current_config_cache
                 policies = current_config.get("policy", {}).get("steering", [])                    # read steering policies
             
                 for policy in self._as_list(policies):                                              # loop through steering policies
