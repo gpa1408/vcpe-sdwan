@@ -70,19 +70,19 @@ class MetricReader:
         now = datetime.now(timezone.utc)
     
         fake_flow_metrics = {
-            ("1001", "UPL1"): {
+            ("257", "UPL1"): {
                 "latency_ms": 20,
                 "jitter_ms": 3,
                 "loss_percent": 0.1,
                 "available_bandwidth_kbps": 50000
             },
-            ("1001", "UPL2"): {
+            ("257", "UPL2"): {
                 "latency_ms": 45,
                 "jitter_ms": 8,
                 "loss_percent": 0.5,
                 "available_bandwidth_kbps": 30000
             },
-            ("1001", "UPL3"): {
+            ("257", "UPL3"): {
                 "latency_ms": 90,
                 "jitter_ms": 25,
                 "loss_percent": 3.0,
