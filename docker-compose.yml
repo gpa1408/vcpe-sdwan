@@ -27,7 +27,7 @@ services:
       - API_PORT=9090
       - STATE_DIR=/state
       - FORWARDER_EXECUTE=1
-      - 'WAN_LINK_MAP_JSON={"UPL1":"ens6","UPL2":"ens7"}'
+      - 'WAN_LINK_MAP_JSON={"UPL1":"ens5","UPL2":"ens6"}'
 
     volumes:
       - vcpe_forwarder_state:/state
