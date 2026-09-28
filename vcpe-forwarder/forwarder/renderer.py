@@ -290,23 +290,24 @@ class Renderer:
                 commands.extend(self._route_for_selected_path(selected_path, current, alloc.route_table, decision.selected_path_type))
 
         for traffic_class, decision in sorted(current.steering_load_balances.items()):
-            if decision.decision_status != "selected" or not decision.eligible_paths:
-                continue
-
             policy_id = f"traffic-class-{traffic_class}"
             alloc = current.allocations.get(f"flow-policy:{policy_id}")
             if not alloc:
                 continue
 
+            # Always clear the previous route before applying the current decision.
+            # This is required when a previously selected load-balance decision
+            # transitions to no-path: the old ECMP route must not remain installed.
             commands.append(f"ip route flush table {alloc.route_table} || true")
             commands.append(f"ip rule del fwmark 0x{alloc.packet_mark:x}/0xffffffff lookup {alloc.route_table} priority {alloc.priority} || true")
             commands.append(f"ip rule add fwmark 0x{alloc.packet_mark:x}/0xffffffff lookup {alloc.route_table} priority {alloc.priority}")
 
-            commands.extend(
-                self._route_for_dynamic_load_balance(
-                    decision.eligible_paths, current, alloc.route_table, decision.selected_path_type
+            if decision.decision_status == "selected" and decision.eligible_paths:
+                commands.extend(
+                    self._route_for_dynamic_load_balance(
+                        decision.eligible_paths, current, alloc.route_table, decision.selected_path_type
+                    )
                 )
-            )
 
         for route_set_id, route_set in sorted(current.static_route_sets.items()):
             for route in route_set.routes:
@@ -687,6 +688,10 @@ class Renderer:
 
         active = current.steering_active_paths.get(traffic_class)
         if active and active.decision_status == "no-path":
+            return "drop"
+
+        load_balance = current.steering_load_balances.get(traffic_class)
+        if load_balance and load_balance.decision_status == "no-path":
             return "drop"
 
         # Important: the flow-policy fwmark is the traffic-class identity returned to the agent.
