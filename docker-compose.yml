@@ -30,6 +30,7 @@ services:
 
     volumes:
       - vcpe_forwarder_state:/state
+      - ./shared-keys:/var/lib/sdwan-cpe/keys:ro
 
 
   # ============================================================
@@ -95,6 +96,7 @@ services:
 
     volumes:
       - vcpe_sbi_state:/var/lib/clixon
+      - ./shared-keys:/var/lib/sdwan-cpe/keys
 
     ports:
       - "8080:8080"
