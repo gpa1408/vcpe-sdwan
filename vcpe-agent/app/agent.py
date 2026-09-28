@@ -8,15 +8,16 @@ import os
 import base64
 import xml.etree.ElementTree as ET                                                    # to parse XML transaction messages sent by Clixon callback plugin
 import threading
+import ipaddress
 
 from http.server import BaseHTTPRequestHandler, HTTPServer                            # internal HTTP server for receiving Clixon callback messages
 from cryptography.hazmat.primitives.asymmetric.x25519 import X25519PrivateKey
 from cryptography.hazmat.primitives import serialization
+from xml.sax.saxutils import escape
 
 from config_reader import ConfigReader
 from monitoring_manager import MonitoringManager  
 from metric_reader import MetricReader                  
-#from state_writer import StateWriter                    #REMOVE COMMENT      
 
 logging.basicConfig(level=logging.INFO)                                               # to show info messages and errors
 
@@ -24,10 +25,26 @@ class Agent:
     def __init__(self):
         self.config_reader = ConfigReader()
         self.monitoring_manager = MonitoringManager(dry_run=True)    
-        self.metric_reader = MetricReader()          
-        #self.state_writer = StateWriter()                #REMOVE COMMENT
+        self.metric_reader = MetricReader()    
+        
+        self.current_config_cache = {}
+        self.latest_flow_state_map = {}                                               # latest per traffic class/WAN metric snapshot
+        self.latest_tunnel_state_map = {}                                             # latest per tunnel metric snapshot
+
+        self.latest_cpe_state = {                                                     # runtime-only overall CPE operational snapshot
+            "oper-status": "unknown",
+            "power-status": "powered-on",
+            "forwarder-status": "unknown",
+            "forwarder-version": None,
+            "uptime-seconds": 0,
+            "last-seen": None,
+            "status-reason": "CPE state not evaluated yet" }
+        
+        self.agent_start_time = time.time()                                           # used to calculate Agent runtime uptime
         
         self.generated_tunnel_keys = {}                                               # stores generated WireGuard keys during the current agent runtime
+        self.wan_nat_types = {}                                                       # latest discovered NAT type for each WAN link
+        self.wan_last_ipv4 = {}                                                       # last observed WAN IPv4, used to detect DHCP/ static IP changes
         self.flow_id_fwmarks = {}                                                     # stores generated fwmark to use for monitoring flow id
         self.forwarder_base_url = "http://host.docker.internal:9090"                  # fixed forwarder API URL used by the agent
         self.forwarder_dry_run = False                                                # If forwarder is not ready yet,a dry-run "true" (false send real API calls)
@@ -73,9 +90,9 @@ class Agent:
             if len(list(child)) == 0:                                                 #if this XML node has no child nodes, it is a simple leaf
                 value = child.text
             else:
-                value = self._xml_to_dict(child)                                     #if this XML node has child nodes, convert that nested object also
+                value = self._xml_to_dict(child)                                      #if this XML node has child nodes, convert that nested object also
 
-            if name in result:                                                       #if the same leaf/list name appears again, store values as a list
+            if name in result:                                                        #if the same leaf/list name appears again, store values as a list
                 if not isinstance(result[name], list):
                     result[name] = [result[name]]
                 result[name].append(value)
@@ -106,7 +123,7 @@ class Agent:
         if value is None or value == "any":
             return None                                                              # no port filter is needed when the YANG value is any
         port = int(value)                                                            # forwarder expects port numbers as integers
-        return {"start": port, "end": port}                                        # single port is represented as a range with same start and end
+        return {"start": port, "end": port}                                          # single port is represented as a range with same start and end
 
     def _ip_from_prefix(self, prefix):
         if not prefix:
@@ -126,7 +143,7 @@ class Agent:
         public_path = f"{public_dir}/{tunnel_name}.pub"                             # local public key file path exposed later as config false state
 
         try:
-            if os.path.exists(private_path) and os.path.exists(public_path):          # reuse existing keys instead of generating new keys every restart
+            if os.path.exists(private_path) and os.path.exists(public_path):        # reuse existing keys instead of generating new keys every restart
                 with open(private_path, "r") as f:
                     private_key = f.read().strip()
 
@@ -167,64 +184,600 @@ class Agent:
         except Exception as e:
             logging.exception("Failed to get or create WireGuard keys for tunnel %s: %s", tunnel_name, e)
             return None, None, None
+    
+    def _get_forwarder_interface_state(self, interface_name):
+        try:
+            url = f"{self.forwarder_base_url}/api/v1/interfaces/{interface_name}"  # Forwarder interface state endpoint
+    
+            response = requests.get( url, headers={"Accept": "application/json"}, timeout=5)                                                                     # ask Forwarder for current Linux interface state
+    
+            response.raise_for_status()                               
+            data = response.json()                                                # Forwarder Interface object
+    
+            ipv4_address = None                                                   # default when no address
+    
+            for address in data.get("addresses", []):                             
+                try:
+                    interface = ipaddress.ip_interface(address)                   # parse address such as 192.168.122.169/24
+    
+                    if interface.version == 4:                                    # YANG leaf currently expects IPv4
+                        ipv4_address = str(interface.ip)                          # remove prefix and keep only 192.168.122.169
+                        break
+    
+                except ValueError:
+                    continue                                                     
+    
+            forwarder_oper_state = data.get("oper_state", "unknown")              # read actual runtime link state
+    
+            if forwarder_oper_state == "up":
+                oper_status = "up"                                             
+            else:
+                oper_status = "down"                                             
+    
+            return {
+                "ipv4-address": ipv4_address,                                     # dynamically learned/static IPv4
+                "oper-status": oper_status                                        # current operational status
+            }
+    
+        except Exception as e:
+            logging.warning("Failed to read interface state for %s from Forwarder: %s", interface_name,e)
+    
+            return {
+                "ipv4-address": None,                                             # do not expose stale IP on failure
+                "oper-status": "down"                                             # failed state lookup is treated as unavailable
+            }
 
+    def _update_cpe_state(self):
+        now_ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    
+        forwarder_status = "down"
+        forwarder_version = None
+        status_reason = "Forwarder is unreachable"
+    
+        try:
+            response = requests.get(
+                f"{self.forwarder_base_url}/api/v1/health",
+                headers={"Accept": "application/json"},
+                timeout=5
+            )
+    
+            response.raise_for_status()
+    
+            data = response.json()
+    
+            forwarder_status = "healthy"
+            forwarder_version = data.get("version")
+            status_reason = "CPE agent and forwarder are operational"
+    
+        except Exception as e:
+            logging.warning("Forwarder health check failed: %s", e)
+    
+        if forwarder_status == "healthy":
+            oper_status = "up"
+        elif forwarder_status == "down":
+            oper_status = "degraded"
+        else:
+            oper_status = "unknown"
+    
+        self.latest_cpe_state = {
+            "oper-status": oper_status,
+            "power-status": "powered-on",
+            "forwarder-status": forwarder_status,
+            "forwarder-version": forwarder_version,
+            "uptime-seconds": int(time.time() - self.agent_start_time),
+            "last-seen": now_ts,
+            "status-reason": status_reason
+        }
+    # =====================================================================================
+    # Controller Annoucements
+    # =====================================================================================
+    def _announce_to_controller(self):
+        try:
+            current_config = self.config_reader.get_intended_config()                     # read system parameters from local YANG datastore
+            system = current_config.get("system", {})                                     # get CPE system configuration
+    
+            hostname = system.get("hostname")                                             # CPE hostname sent during registration
+            management_ip = system.get("management-ip")                                   # address controller uses to reach this CPE
+            controller_ip = system.get("controller-ip")                                   # preconfigured controller address
+            controller_port = system.get("controller-port")                               # preconfigured controller HTTP port
+    
+            if not hostname or not management_ip:
+                logging.warning("Cannot register CPE: hostname or management-ip is missing")
+                return False
+    
+            if not controller_ip or not controller_port:
+                logging.warning("Cannot register CPE: controller-ip or controller-port is missing")
+                return False
+    
+            payload = {
+                "hostname": hostname,
+                "management-ip": management_ip
+            }                                                                              # exact JSON currently expected by controller
+    
+            url = f"http://{controller_ip}:{controller_port}/announce"                     # build controller registration endpoint from YANG
+    
+            response = requests.post(
+                url,
+                json=payload,
+                timeout=5
+            )                                                                              # send initial CPE registration
+    
+            response.raise_for_status()                                                    # controller should respond HTTP 200
+    
+            logging.info(
+                "CPE registration successful: hostname=%s management-ip=%s",
+                hostname,
+                management_ip
+            )
+    
+            return True
+    
+        except Exception as e:
+            logging.warning("CPE registration with controller failed: %s", e)
+            return False
     # =====================================================================================
     # Publish operations data in Datastore
     # =====================================================================================
-    def detect_and_store_nat_type(self, wan_name, interface_name, role):
-        if role != "ipvpn" and wan_name and interface_name:
-            if self.forwarder_dry_run:                                                   # in dry-run mode, only print the transaction without calling forwarder
-                logging.info("Dry-run: NAT detection skipped for WAN link %s", wan_name)
-                return None
+    def detect_nat_type(self, wan_name, interface_name, role):
+        if role == "ipvpn":                                                       # NAT discovery is not needed for IP-VPN links
+            self.wan_nat_types.pop(wan_name, None)                                # remove any old NAT result
+            return None
+    
+        if not wan_name or not interface_name:                                    # both identifiers are required
+            return None
+    
+        try:
+            interface_state = self._get_forwarder_interface_state(interface_name) # read current live interface state
+            ipv4_address = interface_state.get("ipv4-address")                    # get current WAN IPv4
+    
+            if not ipv4_address:
+                logging.info(
+                    "Skipping NAT discovery for WAN %s because interface %s has no IPv4 address yet",
+                    wan_name,
+                    interface_name
+                )
+                return None                                                       # NAT discovery must wait until WAN has an address
+    
+            url = (
+                f"{self.forwarder_base_url}"
+                f"/api/v1/interfaces/{interface_name}/nat-discovery"
+            )                                                                     # Forwarder NAT discovery endpoint
+    
+            response = requests.post(
+                url,
+                json={},
+                timeout=10
+            )                                                                     # start asynchronous NAT discovery
+    
+            response.raise_for_status()                                           # raise error on HTTP failure
+    
+            task_id = response.json().get("task_id")                              # get NAT discovery task identifier
+    
+            if not task_id:
+                return None                                                       # cannot poll without task identifier
+    
+            result_url = (
+                f"{self.forwarder_base_url}"
+                f"/api/v1/interfaces/{interface_name}/nat-discovery/{task_id}"
+            )                                                                     # polling endpoint
+    
+            nat_type = None                                                       # NAT result not available yet
+    
+            for _ in range(5):
+                result = requests.get(
+                    result_url,
+                    headers={"Accept": "application/json"},
+                    timeout=10
+                )                                                                 # poll NAT discovery result
+    
+                result.raise_for_status()                                         # raise on HTTP failure
+                data = result.json()                                              # parse Forwarder response
+                status = data.get("status")                                       # running / completed / failed
+    
+                if status == "completed":
+                    nat_type = data.get("results", {}).get("nat_type")            # get final NAT type
+                    break
+    
+                if status == "failed":
+                    break                                                         # stop polling when discovery failed
+    
+                if status == "running":
+                    time.sleep(1)                                                 # wait before next poll
+    
+            if nat_type:
+                self.wan_nat_types[wan_name] = nat_type                           # update current runtime NAT state
+    
+                logging.info(
+                    "Updated NAT type=%s for WAN link=%s",
+                    nat_type,
+                    wan_name
+                )
+    
+            return nat_type
+    
+        except Exception as e:
+            logging.exception(
+                "NAT detection failed for WAN link %s: %s",
+                wan_name,
+                e
+            )
+    
+            return None
 
-            try:
-                url = f"{self.forwarder_base_url}/api/v1/interfaces/{interface_name}/nat-discovery" # OpenAPI NAT discovery endpoint is interface based
-                response = requests.post(url, json={}, timeout=10)
-                response.raise_for_status()                                              # raises an error if the forwarder returns a failed HTTP status
+    def discover_nat_for_all_wans(self):
+        current_config = self.config_reader.get_intended_config()                 # read all configured WAN links
+    
+        wan_links = self._as_list(
+            current_config.get("interfaces", {})
+                          .get("underlay", {})
+                          .get("wan-link", [])
+        )                                                                         # extract WAN-link list
+    
+        for wan in wan_links:
+            wan_name = wan.get("name")                                            # example: UPL1
+            interface_name = wan.get("interface-name")                            # example: ens7
+            role = wan.get("role")                                                # example: fiber
+            admin_enabled = self._bool_value(wan.get("admin-enabled"))            # check configured WAN state
+    
+            if not wan_name or not interface_name:
+                continue                                                          # skip incomplete configuration
+    
+            if admin_enabled is False:
+                continue                                                          # skip disabled WAN
+    
+            if role == "ipvpn":
+                self.wan_nat_types.pop(wan_name, None)                            # NAT discovery is not required for IP-VPN WAN
+                continue
+    
+            for _ in range(15):
+                interface_state = self._get_forwarder_interface_state(
+                    interface_name
+                )                                                                 # wait until WAN gets usable IP
+    
+                current_ipv4 = interface_state.get("ipv4-address")
+    
+                if current_ipv4:
+                    self.wan_last_ipv4[wan_name] = current_ipv4                  # establish initial IP baseline
+    
+                    self.detect_nat_type(
+                        wan_name,
+                        interface_name,
+                        role
+                    )                                                             # initial NAT discovery
+    
+                    break
+    
+                time.sleep(2)                                                     # DHCP may still be running
+            
+    def check_wan_ip_changes(self):
+        current_config = self.config_reader.get_intended_config()                 # read current WAN configuration
+    
+        wan_links = self._as_list(
+            current_config.get("interfaces", {})
+                          .get("underlay", {})
+                          .get("wan-link", [])
+        )                                                                         # get configured WAN links
+    
+        for wan in wan_links:
+            wan_name = wan.get("name")                                            # logical WAN name
+            interface_name = wan.get("interface-name")                            # Linux interface
+            role = wan.get("role")                                                # broadband/fiber/lte/ipvpn
+            admin_enabled = self._bool_value(wan.get("admin-enabled"))            # configured administrative state
+    
+            if not wan_name or not interface_name:
+                continue                                                          # skip incomplete WAN
+    
+            if admin_enabled is False:
+                continue                                                          # skip disabled WAN
+    
+            if role == "ipvpn":
+                continue                                                          # NAT discovery is not required for IP-VPN WAN
+    
+            interface_state = self._get_forwarder_interface_state(interface_name) # read live Forwarder state
+            current_ipv4 = interface_state.get("ipv4-address")                    # current effective WAN IP
+            previous_ipv4 = self.wan_last_ipv4.get(wan_name)                      # last observed WAN IP
+    
+            if current_ipv4 == previous_ipv4:
+                continue                                                          # nothing changed
+    
+            self.wan_last_ipv4[wan_name] = current_ipv4                           # remember latest state
+    
+            if current_ipv4 is None:
+                self.wan_nat_types.pop(wan_name, None)                            # old NAT result is no longer valid
+                continue                                                          # wait until WAN receives an address again
+    
+            logging.info(
+                "WAN IPv4 changed: wan=%s old=%s new=%s",
+                wan_name,
+                previous_ipv4,
+                current_ipv4
+            )
+    
+            self.detect_nat_type(
+                wan_name,
+                interface_name,
+                role
+            )                                                                      # rediscover NAT for the new WAN address
+    
+            self._announce_to_controller()                                        # trigger controller tunnel reconciliation
+        
+    def build_operational_state_xml(self):
+        current_config = self.current_config_cache                                        # use cached config to avoid recursive RESTCONF call
+        flow_state_map = self.latest_flow_state_map
+        tunnel_state_map = self.latest_tunnel_state_map
 
-                task_id = response.json().get("task_id")
-                if not task_id:
-                    return None
+        if not current_config:
+            return '<sdwan xmlns="urn:sdwan:cpe"/>'
+    
+        xml_parts = ['<sdwan xmlns="urn:sdwan:cpe">']                                      # start top-level sdwan tree
+    
+        # =================================================================================
+        # Tunnel operational information
+        # =================================================================================
+    
+        tunnels = self._as_list(
+            current_config.get("overlay", {}).get("tunnel", [])
+        )                                                                                 # get configured WireGuard tunnels
+    
+        if tunnels:
+            xml_parts.append("<overlay>")                                                  # open overlay container
+    
+            for tunnel in tunnels:
+                tunnel_name = tunnel.get("name")                                          # example: wg01
+    
+                if not tunnel_name:
+                    continue                                                              # skip invalid tunnel objects
+    
+                key_data = self.generated_tunnel_keys.get(tunnel_name, {})                 # check currently loaded WireGuard keys
+                public_key = key_data.get("public-key")                                    # read local public key
+    
+                if not public_key:
+                    private_key, public_key, private_path = \
+                        self._generate_wireguard_tunnel_keys(tunnel_name)                  # recover existing keys or generate them
+    
+                    if private_key and public_key:
+                        self.generated_tunnel_keys[tunnel_name] = {
+                            "private-key": private_key,
+                            "public-key": public_key,
+                            "private-path": private_path
+                        }                                                                  # restore key information into runtime memory
+    
+                if not public_key:
+                    continue                                                              # skip if key is unavailable
+    
+                xml_parts.append("<tunnel>")                                               # open tunnel list entry
+                xml_parts.append(
+                    f"<name>{escape(tunnel_name)}</name>"
+                )                                                                          # tunnel list key
+                xml_parts.append(
+                    f"<local-public-key>{escape(public_key)}</local-public-key>"
+                )                                                                          # config false local WireGuard public key
+                xml_parts.append("</tunnel>")                                              # close tunnel entry
+    
+            xml_parts.append("</overlay>")                                                 # close overlay container
+    
+        # =================================================================================
+        # WAN operational information
+        # =================================================================================
+    
+        xml_parts.append("<state>")                                                        # open config false operational-state container
+    
+        wan_links = self._as_list(
+            current_config.get("interfaces", {})
+                          .get("underlay", {})
+                          .get("wan-link", [])
+        )                                                                                  # read configured WAN links
+    
+        for wan in wan_links:
+            wan_name = wan.get("name")                                                     # example: UPL1
+            interface_name = wan.get("interface-name")                                     # example: ens7
+    
+            if not wan_name or not interface_name:
+                continue                                                                  # skip incomplete WAN object
+    
+            interface_state = self._get_forwarder_interface_state(interface_name)          # get live state from Forwarder
+    
+            ipv4_address = interface_state.get("ipv4-address")                             # current DHCP/static IPv4
+            oper_status = interface_state.get("oper-status")                               # current interface operational state
+            nat_type = self.wan_nat_types.get(wan_name)                                    # most recently discovered NAT type
+    
+            xml_parts.append("<wan-link-state>")                                           # create WAN operational-state list entry
+            xml_parts.append(
+                f"<name>{escape(wan_name)}</name>"
+            )                                                                              # mandatory wan-link-state key
+    
+            if oper_status:
+                xml_parts.append(
+                    f"<oper-status>{escape(oper_status)}</oper-status>"
+                )                                                                          # expose current WAN status
+    
+            if ipv4_address:
+                xml_parts.append(
+                    f"<ipv4-address>{escape(ipv4_address)}</ipv4-address>"
+                )                                                                          # expose current effective WAN IPv4
+    
+            if nat_type:
+                xml_parts.append(
+                    f"<nat-type>{escape(nat_type)}</nat-type>"
+                )                                                                          # expose latest runtime NAT discovery result
+    
+            xml_parts.append("</wan-link-state>")                                          # close WAN operational-state entry
 
-                result_url = f"{self.forwarder_base_url}/api/v1/interfaces/{interface_name}/nat-discovery/{task_id}"
-                nat_type = None
+        # =================================================================================
+        # Per traffic-class / WAN-link monitoring state
+        # =================================================================================
 
-                for _ in range(5):                                                       # small polling loop for the asynchronous NAT discovery task
-                    result = requests.get(result_url, headers={"Accept": "application/json"}, timeout=10)
-                    result.raise_for_status()
-                    data = result.json()                                                 # parse response body                 
-                
-                    status = data.get("status")                                         
-                
-                    if status == "completed":                                            
-                        nat_type = data.get("results", {}).get("nat_type")             
-                        break                                                            # stop polling
-                
-                    if status == "failed":                                              
-                        logging.warning("NAT discovery failed for wan-link=%s", wan_name) 
-                        return None                                                      # stop NAT discovery
-                
-                    if status == "running":                                              # NAT discovery is still not finished
-                        time.sleep(1)                                                    # wait before next polling attempt
-                        continue                                                         # poll again
+        for traffic_class, wan_states in flow_state_map.items():
 
-                if not nat_type:
-                    return None
+            for wan_name, metric_state in wan_states.items():
 
-                state_dir = "/var/lib/clixon/wan-link-nat-types"                         # state plugin can read this directory to publish config false nat-type
-                os.makedirs(state_dir, exist_ok=True)
+                if not traffic_class or not wan_name:
+                    continue
 
-                with open(f"{state_dir}/{wan_name}.nat", "w") as f:                      # one runtime state file is stored per WAN link
-                    f.write(nat_type)
+                xml_parts.append("<flow-state>")
 
-                logging.info("Stored nat-type=%s for wan-link=%s", nat_type, wan_name)
-                return nat_type
+                xml_parts.append(
+                    f"<class>{escape(str(traffic_class))}</class>"
+                )
 
-            except Exception as e:
-                logging.exception("NAT detection failed for WAN link %s: %s", wan_name, e)
-                return None
+                xml_parts.append(
+                    f"<wan-link>{escape(str(wan_name))}</wan-link>"
+                )
 
-        return None
+                flow_id = metric_state.get("flow-id")
+                if flow_id is not None:
+                    xml_parts.append(
+                        f"<flow-id>{int(flow_id)}</flow-id>"
+                    )
+
+                oper_status = metric_state.get("oper-status")
+                if oper_status:
+                    xml_parts.append(
+                        f"<oper-status>{escape(str(oper_status))}</oper-status>"
+                    )
+
+                latency = metric_state.get("latency-ms")
+                if latency is not None:
+                    xml_parts.append(
+                        f"<latency-ms>{int(latency)}</latency-ms>"
+                    )
+
+                jitter = metric_state.get("jitter-ms")
+                if jitter is not None:
+                    xml_parts.append(
+                        f"<jitter-ms>{int(jitter)}</jitter-ms>"
+                    )
+
+                loss = metric_state.get("loss-percent")
+                if loss is not None:
+                    xml_parts.append(
+                        f"<loss-percent>{loss}</loss-percent>"
+                    )
+
+                bandwidth = metric_state.get("available-bandwidth-kbps")
+                if bandwidth is not None:
+                    xml_parts.append(
+                        f"<available-bandwidth-kbps>{int(bandwidth)}</available-bandwidth-kbps>"
+                    )
+
+                timestamp = metric_state.get("metric-timestamp")
+                if timestamp:
+                    xml_parts.append(
+                        f"<last-updated>{escape(str(timestamp))}</last-updated>"
+                    )
+
+                xml_parts.append("</flow-state>")
+
+        # =================================================================================
+        # Tunnel monitoring state
+        # =================================================================================
+
+        for tunnel_name, metric_state in tunnel_state_map.items():
+
+            if not tunnel_name:
+                continue
+
+            xml_parts.append("<tunnel-state>")
+
+            xml_parts.append(
+                f"<name>{escape(str(tunnel_name))}</name>"
+            )
+
+            oper_status = metric_state.get("oper-status")
+            if oper_status:
+                xml_parts.append(
+                    f"<oper-status>{escape(str(oper_status))}</oper-status>"
+                )
+
+            latency = metric_state.get("latency-ms")
+            if latency is not None:
+                xml_parts.append(
+                    f"<latency-ms>{int(latency)}</latency-ms>"
+                )
+
+            jitter = metric_state.get("jitter-ms")
+            if jitter is not None:
+                xml_parts.append(
+                    f"<jitter-ms>{int(jitter)}</jitter-ms>"
+                )
+
+            loss = metric_state.get("loss-percent")
+            if loss is not None:
+                xml_parts.append(
+                    f"<loss-percent>{loss}</loss-percent>"
+                )
+
+            bandwidth = metric_state.get("available-bandwidth-kbps")
+            if bandwidth is not None:
+                xml_parts.append(
+                    f"<available-bandwidth-kbps>{int(bandwidth)}</available-bandwidth-kbps>"
+                )
+
+            timestamp = metric_state.get("metric-timestamp")
+            if timestamp:
+                xml_parts.append(
+                    f"<last-updated>{escape(str(timestamp))}</last-updated>"
+                )
+
+            xml_parts.append("</tunnel-state>")
+
+        # =================================================================================
+        # Overall CPE operational state
+        # =================================================================================
+
+        cpe_state = self.latest_cpe_state
+
+        xml_parts.append("<cpe-state>")
+
+        oper_status = cpe_state.get("oper-status")
+        if oper_status:
+            xml_parts.append(
+                f"<oper-status>{escape(str(oper_status))}</oper-status>"
+            )
+
+        power_status = cpe_state.get("power-status")
+        if power_status:
+            xml_parts.append(
+                f"<power-status>{escape(str(power_status))}</power-status>"
+            )
+
+        forwarder_status = cpe_state.get("forwarder-status")
+        if forwarder_status:
+            xml_parts.append(
+                f"<forwarder-status>{escape(str(forwarder_status))}</forwarder-status>"
+            )
+
+        forwarder_version = cpe_state.get("forwarder-version")
+        if forwarder_version:
+            xml_parts.append(
+                f"<forwarder-version>{escape(str(forwarder_version))}</forwarder-version>"
+            )
+
+        uptime = cpe_state.get("uptime-seconds")
+        if uptime is not None:
+            xml_parts.append(
+                f"<uptime-seconds>{int(uptime)}</uptime-seconds>"
+            )
+
+        last_seen = cpe_state.get("last-seen")
+        if last_seen:
+            xml_parts.append(
+                f"<last-seen>{escape(str(last_seen))}</last-seen>"
+            )
+
+        status_reason = cpe_state.get("status-reason")
+        if status_reason:
+            xml_parts.append(
+                f"<status-reason>{escape(str(status_reason))}</status-reason>"
+            )
+
+        xml_parts.append("</cpe-state>")
+    
+        xml_parts.append("</state>")                                                       # close operational-state container
+        xml_parts.append("</sdwan>")                                                       # close top-level YANG container
+    
+        return "".join(xml_parts)                                                          # return complete XML to internal state API
+        
     # =====================================================================================
     # Check RESTCONF Server status before running Steering Loop
     # =====================================================================================
@@ -246,8 +799,14 @@ class Agent:
     def run_steering_loop_after_restconf_ready(self, interval_sec=10):
         if not self.wait_for_restconf():                                                # wait until Clixon RESTCONF is ready
             return                                                                      # stop startup if RESTCONF is not ready
+
+        self.current_config_cache = self.config_reader.get_intended_config()            # populate cache once at startup
+            
         self._sync_fwmarks_from_forwarder()                                             # recover existing fwmarks from forwarder after router/agent reboot (only once)
+        self.discover_nat_for_all_wans()                                                # initial NAT discovery for all WANs
+        self._announce_to_controller()                                                  # send one initial CPE registration to controller
         self.run_forever(interval_sec=interval_sec)
+        
     # =====================================================================================
     # Forwarder API helpers
     # =====================================================================================
@@ -756,7 +1315,7 @@ class Agent:
                     logging.warning("Cannot start monitoring: traffic class has no name")   # log missing class name
                     return                                                                 # stop this monitoring action
     
-                current_config = self.config_reader.get_intended_config()                  # read full current YANG datastore config
+                current_config = self.current_config_cache          
                 policies = current_config.get("policy", {}).get("steering", [])           # read steering policies
     
                 for policy in self._as_list(policies):                                     # loop through steering policies
@@ -831,7 +1390,7 @@ class Agent:
                 if flow_id is None:                                                                 # if forwarder has not returned fwmark yet
                     flow_id = self._assign_temporary_fake_fwmark(class_name)                        # use temporary fake fwmark
             
-                current_config = self.config_reader.get_intended_config()                           # read current datastore config
+                current_config = self.current_config_cache
                 policies = current_config.get("policy", {}).get("steering", [])                    # read steering policies
             
                 for policy in self._as_list(policies):                                              # loop through steering policies
@@ -958,19 +1517,8 @@ class Agent:
             if object_type in ["class", "tunnel"]:                                     
                 monitoring_start_candidates.append({                                         # if traffic class or tunnel changed, schedule monitoring start/update
                     "object_type": object_type,                                        
-                    "parent_dict": parent_dict                                               # object data
-                })
-
-            if object_type == "wan-link":                                                    # WAN changes may require NAT detection after commit
-                if self._has_change(
-                    changed_leafs,
-                    "interface-name",
-                    "role",
-                    "address-mode",
-                    "static-address",
-                    "static-gateway",
-                    "admin-enabled"):
-                    nat_detection_candidates.append(parent_dict)                            #store this WAN object for NAT detection after commit
+                    "parent_dict": parent_dict     })                                             # object data
+             
 
         added = root.find("added")                                                      # contains newly added datastore objects
         
@@ -990,6 +1538,9 @@ class Agent:
                         monitoring_start_candidates.append({
                             "object_type": object_type,
                             "parent_dict": parent_dict })
+
+                    if object_type == "wan-link":
+                        nat_detection_candidates.append(parent_dict)                          # run NAT discovery for newly added WAN
                             
         deleted = root.find("deleted")                                                      # contains deleted datastore objects (normally delete=False, but when clixon reports delete->delete=True)
         
@@ -1022,10 +1573,10 @@ class Agent:
 
         if phase == "commit":                                                              # NAT detection is triggered only after the config is committed
             for wan in nat_detection_candidates:
-                self.detect_and_store_nat_type(
+                self.detect_nat_type(
                     wan.get("name"),
                     wan.get("interface-name"),
-                    wan.get("role"))
+                    wan.get("role"))                                                       # rediscover NAT only for the changed WAN
 
             for item in monitoring_start_candidates:                                        # start/update monitoring only after real commit
                 self._start_monitoring_for_object(                              
@@ -1310,6 +1861,10 @@ class Agent:
     # =====================================================================================
     def run_once(self):
         current_config = self.config_reader.get_intended_config()                           # read intended config from YANG datastore
+        self.current_config_cache = current_config
+
+        self.check_wan_ip_changes()                                                         # detect changed WAN endpoint and notify controller
+        self._update_cpe_state()
     
         if not hasattr(self, "metric_reader"):
             logging.warning("metric_reader not configured")
@@ -1391,6 +1946,9 @@ class Agent:
             flow_state_map,
             tunnel_state_map
         )                                                                                   # make steering decisions using flow and tunnel states
+
+        self.latest_flow_state_map = flow_state_map                                         # replace previous current flow metric snapshot & expose latest underlay flow metrics through YANG state
+        self.latest_tunnel_state_map = tunnel_state_map                                     # replace previous current tunnel metric snapshot & expose latest underlay flow metrics through YANG state
     
         steering_operations = self._build_steering_operations(steering_decisions)            # convert decisions to forwarder operations
     
@@ -1431,6 +1989,45 @@ class Agent:
 
 class ClixonCallbackHandler(BaseHTTPRequestHandler):
     agent = None
+
+    def do_GET(self):
+        try:
+            if self.path != "/internal/operational-state":
+                self.send_response(404)                                                   # reject unknown internal GET endpoints
+                self.end_headers()
+                return
+    
+            xml_body = self.agent.build_operational_state_xml()                            # build current operational-state XML
+    
+            encoded_body = xml_body.encode("utf-8")                                        # convert XML into HTTP response bytes
+    
+            self.send_response(200)                                                     
+            self.send_header(
+                "Content-Type",
+                "application/yang-data+xml"
+            )                                                                              # response contains YANG XML
+            self.send_header(
+                "Content-Length",
+                str(len(encoded_body))
+            )                                                                              # send correct HTTP body length
+            self.end_headers()
+    
+            self.wfile.write(encoded_body)                                                 # return state XML to Clixon state plugin
+    
+        except Exception as e:
+            logging.exception("Operational state request failed: %s",e)                                                                          
+    
+            error_body = json.dumps({
+                "status": "error",
+                "reason": str(e)
+            }).encode("utf-8")                                                             # construct internal error response
+    
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(error_body)))
+            self.end_headers()
+    
+            self.wfile.write(error_body)                                                   # return error to state plugin
 
     def do_POST(self):
         try:

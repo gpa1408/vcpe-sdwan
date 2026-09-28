@@ -131,28 +131,40 @@
      */
     container system {
       description
-        "Local CPE system identity and management information.";
+        "Local CPE system identity and management information";
 
       leaf local-cpe-id {
         type cpe-id;
-        mandatory true;
         description
-          "Unique identifier of this CPE";
+          "Unique identifier assigned to this CPE by the SD-WAN controller after registration";
       }
 
       leaf hostname {
         type string;
         description
-          "Hostname of this CPE.";
+          "Hostname of this CPE";
       }
 
       leaf management-ip {
         type inet:ipv4-address;
         description
-          "Management IP address of this CPE.";
+          "Management IP address of this CPE";
+      }
+
+      leaf controller-ip {
+        type inet:ipv4-address;
+        default "192.168.122.200";                    // To be replaced with the actual controller IP
+        description
+          "IPv4 address of the SD-WAN controller";
+      }
+  
+      leaf controller-port {
+        type inet:port-number;
+        default "9000";
+        description
+          "HTTP port used by the SD-WAN controller announcement API";
       }
     }
-    
     /*
      * ==================================================================================
      * CPE Interface roles
@@ -801,32 +813,68 @@
           description
               "Detected NAT type of this WAN link.";
           }        
+      }
 
+      list flow-state {
+        key "class wan-link";
+        description
+          "Latest operational monitoring state for a traffic class over a WAN link.";
+      
+        leaf class {
+          type leafref {
+            path "/scpe:sdwan/scpe:traffic/scpe:class/scpe:name";
+          }
+          description
+            "Traffic class associated with this monitored flow.";
+        }
+      
+        leaf wan-link {
+          type leafref {
+            path "/scpe:sdwan/scpe:interfaces/scpe:underlay/scpe:wan-link/scpe:name";
+          }
+          description
+            "WAN link over which this traffic class is monitored.";
+        }
+      
+        leaf flow-id {
+          type uint32;
+          description
+            "Forwarder fwmark used as the monitoring flow identifier.";
+        }
+      
+        leaf oper-status {
+          type enumeration {
+            enum up;
+            enum down;
+            enum degraded;
+          }
+          description
+            "Operational health of this traffic-class/WAN candidate.";
+        }
+      
         leaf latency-ms {
           type uint32;
           units "ms";
-          description
-            "Measured latency";
         }
-
+      
         leaf jitter-ms {
           type uint32;
           units "ms";
-          description
-            "Measured jitter";
         }
-
+      
         leaf loss-percent {
           type percentage;
-          description
-            "Measured packet loss percentage";
         }
-
+      
         leaf available-bandwidth-kbps {
           type uint32;
           units "kbps";
+        }
+      
+        leaf last-updated {
+          type yang:date-and-time;
           description
-            "Estimated available bandwidth";
+            "Timestamp of the latest monitoring sample.";
         }
       }
 
@@ -886,6 +934,11 @@
           units "kbps";
           description
             "Estimated available bandwidth";
+        }
+        leaf last-updated {
+          type yang:date-and-time;
+          description
+            "Timestamp of the latest tunnel monitoring sample.";
         }
 
         leaf-list active-class {

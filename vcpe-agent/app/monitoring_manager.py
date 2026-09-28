@@ -24,10 +24,10 @@ class MonitoringManager:
         if not isinstance(slo, dict):                                                      # if SLO object is missing or invalid use default interval for best-effort traffic
             return 600                                                         
 
-        max_latency = slo.get("max-latency-ms")                                          
-        max_jitter = slo.get("max-jitter-ms")                                            
-        max_loss = slo.get("max-loss-percent")                                             
-        min_bandwidth = slo.get("min-bandwidth-kbps")                                      
+        max_latency = float(slo["max-latency-ms"]) if slo.get("max-latency-ms") is not None else None
+        max_jitter = float(slo["max-jitter-ms"]) if slo.get("max-jitter-ms") is not None else None
+        max_loss = float(slo["max-loss-percent"]) if slo.get("max-loss-percent") is not None else None
+        min_bandwidth = float(slo["min-bandwidth-kbps"]) if slo.get("min-bandwidth-kbps") is not None else None                                     
 
         candidate_intervals = []                                                          # stores suggested intervals from each configured SLO metric
 
