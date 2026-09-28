@@ -493,7 +493,7 @@ class Renderer:
             dev = path.tunnel_id if path.type == "wireguard_peer" and path.tunnel_id else path.wan_interface
             nexthops.append(f"nexthop dev {dev} weight {weight}")
         if nexthops:
-            commands.append(f"ip route replace default {' '.join(nexthops)} table {route_table}")
+            commands.append(f"ip route replace default table {route_table} {' '.join(nexthops)}")
         return commands
 
     def _route_for_dynamic_load_balance(
@@ -508,7 +508,10 @@ class Renderer:
             return ["echo 'no resolvable load-balance paths' >&2; exit 42"]
 
         # Build a gateway-aware multipath route at apply time.
-        parts = ["ROUTE='ip route replace default'"]
+        # IMPORTANT: the routing table belongs to the route itself and must be
+        # placed before the multipath nexthop blocks.  Appending "table N"
+        # after the nexthops makes iproute2 reject the command.
+        parts = [f"ROUTE='ip route replace default table {route_table}'"]
         for dev in devices:
             parts.append(
                 f"GW=$(ip -4 route show table all default dev {dev} 2>/dev/null "
@@ -518,7 +521,7 @@ class Renderer:
                 f"if [ -n \"$GW\" ]; then ROUTE=\"$ROUTE nexthop via $GW dev {dev} weight 1\"; "
                 f"else ROUTE=\"$ROUTE nexthop dev {dev} weight 1\"; fi"
             )
-        parts.append(f"eval \"$ROUTE table {route_table}\"")
+        parts.append('eval "$ROUTE"')
         return ["; ".join(parts)]
 
     def _can_route_direct(self, selected_path: str | None, state: ForwarderState) -> bool:
