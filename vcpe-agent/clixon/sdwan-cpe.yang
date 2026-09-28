@@ -813,33 +813,6 @@
           description
               "Detected NAT type of this WAN link.";
           }        
-
-        leaf latency-ms {
-          type uint32;
-          units "ms";
-          description
-            "Measured latency";
-        }
-
-        leaf jitter-ms {
-          type uint32;
-          units "ms";
-          description
-            "Measured jitter";
-        }
-
-        leaf loss-percent {
-          type percentage;
-          description
-            "Measured packet loss percentage";
-        }
-
-        leaf available-bandwidth-kbps {
-          type uint32;
-          units "kbps";
-          description
-            "Estimated available bandwidth";
-        }
       }
 
       list flow-state {
