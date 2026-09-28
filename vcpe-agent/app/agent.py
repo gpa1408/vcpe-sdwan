@@ -31,7 +31,7 @@ class Agent:
         self.latest_flow_state_map = {}                                               # latest per traffic class/WAN metric snapshot
         self.latest_tunnel_state_map = {}                                             # latest per tunnel metric snapshot
 
-        self.latest_cpe_state = {                                      # runtime-only overall CPE operational snapshot
+        self.latest_cpe_state = {                                                     # runtime-only overall CPE operational snapshot
             "oper-status": "unknown",
             "power-status": "powered-on",
             "forwarder-status": "unknown",
@@ -40,7 +40,7 @@ class Agent:
             "last-seen": None,
             "status-reason": "CPE state not evaluated yet" }
         
-        self.agent_start_time = time.time()                            # used to calculate Agent runtime uptime
+        self.agent_start_time = time.time()                                           # used to calculate Agent runtime uptime
         
         self.generated_tunnel_keys = {}                                               # stores generated WireGuard keys during the current agent runtime
         self.wan_nat_types = {}                                                       # latest discovered NAT type for each WAN link
@@ -90,9 +90,9 @@ class Agent:
             if len(list(child)) == 0:                                                 #if this XML node has no child nodes, it is a simple leaf
                 value = child.text
             else:
-                value = self._xml_to_dict(child)                                     #if this XML node has child nodes, convert that nested object also
+                value = self._xml_to_dict(child)                                      #if this XML node has child nodes, convert that nested object also
 
-            if name in result:                                                       #if the same leaf/list name appears again, store values as a list
+            if name in result:                                                        #if the same leaf/list name appears again, store values as a list
                 if not isinstance(result[name], list):
                     result[name] = [result[name]]
                 result[name].append(value)
@@ -123,7 +123,7 @@ class Agent:
         if value is None or value == "any":
             return None                                                              # no port filter is needed when the YANG value is any
         port = int(value)                                                            # forwarder expects port numbers as integers
-        return {"start": port, "end": port}                                        # single port is represented as a range with same start and end
+        return {"start": port, "end": port}                                          # single port is represented as a range with same start and end
 
     def _ip_from_prefix(self, prefix):
         if not prefix:
@@ -143,7 +143,7 @@ class Agent:
         public_path = f"{public_dir}/{tunnel_name}.pub"                             # local public key file path exposed later as config false state
 
         try:
-            if os.path.exists(private_path) and os.path.exists(public_path):          # reuse existing keys instead of generating new keys every restart
+            if os.path.exists(private_path) and os.path.exists(public_path):        # reuse existing keys instead of generating new keys every restart
                 with open(private_path, "r") as f:
                     private_key = f.read().strip()
 
@@ -201,7 +201,7 @@ class Agent:
                     interface = ipaddress.ip_interface(address)                   # parse address such as 192.168.122.169/24
     
                     if interface.version == 4:                                    # YANG leaf currently expects IPv4
-                        ipv4_address = str(interface.ip)                           # remove prefix and keep only 192.168.122.169
+                        ipv4_address = str(interface.ip)                          # remove prefix and keep only 192.168.122.169
                         break
     
                 except ValueError:
