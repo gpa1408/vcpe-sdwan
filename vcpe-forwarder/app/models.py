@@ -54,6 +54,7 @@ class Interface(ForwarderModel):
     mtu: int | None = None
     master_bridge: str | None = None
     addresses: list[str] = Field(default_factory=list)
+    address_mode: Literal["static", "dhcp", "none"] = "none"
 
 
 class InterfaceStateUpdate(ForwarderModel):
@@ -389,3 +390,4 @@ class ForwarderState(ForwarderModel):
     access_points: dict[str, AccessPoint] = Field(default_factory=dict)
     nat_discovery_tasks: dict[str, NatDiscoveryTaskRecord] = Field(default_factory=dict)
     allocations: dict[str, Allocation] = Field(default_factory=dict)
+    wan_link_map: dict[str, str] = Field(default_factory=dict)

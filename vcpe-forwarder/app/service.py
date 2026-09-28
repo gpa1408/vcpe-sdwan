@@ -3,7 +3,11 @@
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import socket
+import struct
 import subprocess
 import threading
 import uuid
@@ -80,6 +84,33 @@ class ForwarderService:
         self.runner = CommandRunner(root, execute=execute)
         self.inspector = SystemInspector(use_system_state=use_system_state)
         self._nat_threads: dict[str, threading.Thread] = {}
+
+        # Pamodi's Agent steers using logical YANG WAN names (UPL1, UPL2, ...).
+        # The mapping is deployment-specific, so load it from the same style of env used by Monitoring.
+        self._configured_wan_link_map = self._load_wan_link_map()
+        if self._configured_wan_link_map:
+            def merge_wan_map(state: ForwarderState) -> None:
+                state.wan_link_map.update(self._configured_wan_link_map)
+                for interface_name in self._configured_wan_link_map.values():
+                    interface = self._get_or_create_interface(state, interface_name, role="wan")
+                    state.interfaces[interface_name] = interface.model_copy(update={"role": "wan"})
+            self.store.mutate_state(merge_wan_map)
+
+    def _load_wan_link_map(self) -> dict[str, str]:
+        raw = os.getenv("WAN_LINK_MAP_JSON", "").strip()
+        if not raw:
+            return {}
+        try:
+            data = json.loads(raw)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError(f"invalid WAN_LINK_MAP_JSON: {exc}") from exc
+        if not isinstance(data, dict):
+            raise RuntimeError("WAN_LINK_MAP_JSON must be a JSON object")
+        result: dict[str, str] = {}
+        for logical, interface in data.items():
+            if logical and interface:
+                result[str(logical)] = str(interface)
+        return result
 
     def health(self) -> dict[str, Any]:
         return {
@@ -243,36 +274,85 @@ class ForwarderService:
         self.store.write_task_record(updated)
 
     def _discover_nat(self, interface_name: str, stun_servers: list[str]) -> NatDiscoveryObserved:
+        """Run an RFC5389 Binding Request explicitly bound to the requested WAN.
+
+        A single binding request reliably discovers the mapped address, but it is not
+        sufficient to distinguish full-cone/restricted/symmetric NAT. We therefore
+        report `none` only when public and local IPv4 are equal; otherwise `unknown`.
+        This matches the YANG enum without inventing a NAT classification.
+        """
+        interface = self.inspector.get_interface(interface_name)
+        if interface is None:
+            raise RuntimeError(f"interface {interface_name} is not available in kernel")
+
+        local_ip = None
+        for address in interface.addresses:
+            if ":" not in address:
+                local_ip = address.split("/", 1)[0]
+                break
+        if not local_ip:
+            raise RuntimeError(f"interface {interface_name} has no IPv4 address")
+
         servers = stun_servers or ["stun.l.google.com:19302"]
-        server = servers[0]
-        host, port = self._split_host_port(server)
+        host, port = self._split_host_port(servers[0])
+        infos = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_DGRAM)
+        if not infos:
+            raise RuntimeError(f"cannot resolve STUN server {host}")
+        server_addr = infos[0][4]
 
-        if self.inspector.command_exists("turnutils_stunclient"):
-            completed = subprocess.run(
-                ["turnutils_stunclient", "-p", str(port), host],
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=15,
-            )
-        elif self.inspector.command_exists("stunclient"):
-            completed = subprocess.run(
-                ["stunclient", host, str(port)],
-                capture_output=True,
-                text=True,
-                check=False,
-                timeout=15,
-            )
-        else:
-            raise RuntimeError("no STUN client available")
+        magic_cookie = 0x2112A442
+        transaction_id = os.urandom(12)
+        request = struct.pack("!HHI12s", 0x0001, 0, magic_cookie, transaction_id)
 
-        output = "\n".join(part for part in [completed.stdout, completed.stderr] if part)
-        if completed.returncode != 0:
-            raise RuntimeError(output.strip() or f"STUN command failed for {interface_name}")
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            sock.settimeout(8.0)
+            # Force packets to the requested WAN, not the management/default route.
+            if hasattr(socket, "SO_BINDTODEVICE"):
+                sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, interface_name.encode() + b"\0")
+            sock.bind((local_ip, 0))
+            sock.sendto(request, server_addr)
+            response, _ = sock.recvfrom(2048)
 
-        public_ip, public_port = self._parse_mapped_address(output)
-        nat_type = self._parse_nat_type(output)
+        public_ip, public_port = self._parse_stun_binding_response(
+            response, transaction_id, magic_cookie
+        )
+        nat_type = "none" if public_ip == local_ip else "unknown"
         return NatDiscoveryObserved(public_ip=public_ip, public_port=public_port, nat_type=nat_type)
+
+    def _parse_stun_binding_response(
+        self, data: bytes, transaction_id: bytes, magic_cookie: int
+    ) -> tuple[str, int]:
+        if len(data) < 20:
+            raise RuntimeError("short STUN response")
+        msg_type, msg_len, cookie, rx_id = struct.unpack("!HHI12s", data[:20])
+        if msg_type != 0x0101 or cookie != magic_cookie or rx_id != transaction_id:
+            raise RuntimeError("invalid STUN binding response")
+
+        end = min(len(data), 20 + msg_len)
+        offset = 20
+        mapped = None
+        while offset + 4 <= end:
+            attr_type, attr_len = struct.unpack("!HH", data[offset:offset + 4])
+            value = data[offset + 4:offset + 4 + attr_len]
+            if len(value) != attr_len:
+                break
+
+            if attr_type in (0x0020, 0x0001) and attr_len >= 8 and value[1] == 0x01:
+                port = struct.unpack("!H", value[2:4])[0]
+                addr_int = struct.unpack("!I", value[4:8])[0]
+                if attr_type == 0x0020:  # XOR-MAPPED-ADDRESS
+                    port ^= (magic_cookie >> 16)
+                    addr_int ^= magic_cookie
+                ip = socket.inet_ntoa(struct.pack("!I", addr_int))
+                mapped = (ip, port)
+                if attr_type == 0x0020:
+                    break
+
+            offset += 4 + ((attr_len + 3) & ~3)
+
+        if mapped is None:
+            raise RuntimeError("STUN response has no mapped address")
+        return mapped
 
     def _split_host_port(self, server: str) -> tuple[str, int]:
         if server.startswith("["):
@@ -316,8 +396,11 @@ class ForwarderService:
 
     def _apply_candidate(self, previous: ForwarderState, candidate: ForwarderState) -> RevisionInfo:
         revision = self._predict_revision(previous, candidate)
-        plan = self.renderer.render_transition(previous, candidate, revision)
-        self.store.save_render_plan(plan)                                #NEW LINE PAMODI
+        try:
+            plan = self.renderer.render_transition(previous, candidate, revision)
+        except (ValueError, OSError) as exc:
+            raise ForwarderError(400, f"cannot render dataplane: {exc}") from exc
+        self.store.save_render_plan(plan)
         journal = self.runner.run_plan(plan.phases)
         self.store.save_render_plan(plan, journal)
         self._raise_for_failures(revision, journal)
@@ -574,8 +657,22 @@ class ForwarderService:
         if method == "PUT" and match:
             interface_name = match.group(1)
             update = InterfaceAddressesUpdate.model_validate(payload or {})
-            interface = self._get_or_create_interface(state, interface_name)
-            state.interfaces[interface_name] = interface.model_copy(update={"name": interface_name, "addresses": update.addresses})
+            is_wan = interface_name in state.wan_link_map.values()
+            interface = self._get_or_create_interface(
+                state, interface_name, role="wan" if is_wan else None
+            )
+            if interface_name in state.tunnels:
+                address_mode = "static"
+            elif update.addresses:
+                address_mode = "static"
+            elif is_wan:
+                # Pamodi Agent encodes address-mode=dhcp as addresses: [].
+                address_mode = "dhcp"
+            else:
+                address_mode = "none"
+            state.interfaces[interface_name] = interface.model_copy(
+                update={"name": interface_name, "addresses": update.addresses, "address_mode": address_mode}
+            )
             if interface_name in state.tunnels:
                 state.tunnels[interface_name] = state.tunnels[interface_name].model_copy(update={"local_addresses": update.addresses})
             return OperationOutcome(200, "configured", state.interfaces[interface_name])
@@ -633,6 +730,7 @@ class ForwarderService:
                         "kind": "wireguard",
                         "role": "tunnel",
                         "addresses": tunnel.local_addresses,
+                        "address_mode": "static",
                         "mtu": tunnel.mtu,
                     }
                 )
@@ -748,6 +846,14 @@ class ForwarderService:
             if method == "PUT":
                 route_set = StaticRouteSet.model_validate(payload or {})
                 state.static_route_sets[route_set_id] = route_set
+                if route_set_id.endswith("-default"):
+                    logical_name = route_set_id.removesuffix("-default")
+                    for route in route_set.routes:
+                        if route.out_interface:
+                            state.wan_link_map[logical_name] = route.out_interface
+                            interface = self._get_or_create_interface(state, route.out_interface, role="wan")
+                            state.interfaces[route.out_interface] = interface.model_copy(update={"role": "wan"})
+                            break
                 return OperationOutcome(200, "configured", route_set)
             if method == "DELETE":
                 self._require_mapping_item(state.static_route_sets, route_set_id, "static route set")
@@ -894,9 +1000,17 @@ class ForwarderService:
             state.interfaces[tunnel_id] = interface.model_copy(
                 update={
                     "addresses": tunnel.local_addresses,
+                    "address_mode": "static",
                     "mtu": tunnel.mtu,
                 }
             )
+
+            if not tunnel.private_key_ref:
+                raise ForwarderError(400, f"WireGuard tunnel {tunnel_id} requires private_key_ref")
+            try:
+                self.renderer.secrets.resolve(tunnel.private_key_ref)
+            except (ValueError, OSError) as exc:
+                raise ForwarderError(400, f"WireGuard tunnel {tunnel_id} key cannot be resolved: {exc}") from exc
 
         for tunnel_id in state.peers:
             if tunnel_id not in state.tunnels:
@@ -940,6 +1054,37 @@ class ForwarderService:
 
             if policy.match.ingress_bridge and policy.match.ingress_bridge not in state.bridges:
                 raise ForwarderError(400, f"flow policy {policy_id} references missing bridge {policy.match.ingress_bridge}")
+
+        def validate_selected_path(name: str | None, selected_type: str | None, label: str) -> None:
+            if not name:
+                return
+            if selected_type == "wan-link":
+                mapped = state.wan_link_map.get(name)
+                if not mapped:
+                    route_set = state.static_route_sets.get(f"{name}-default")
+                    if route_set:
+                        mapped = next((r.out_interface for r in route_set.routes if r.out_interface), None)
+                if not mapped:
+                    raise ForwarderError(400, f"{label} references logical WAN {name} but no WAN->interface mapping exists")
+            elif selected_type == "tunnel" and name not in state.tunnels:
+                raise ForwarderError(400, f"{label} references missing tunnel {name}")
+            elif selected_type == "path" and name not in state.paths:
+                raise ForwarderError(400, f"{label} references missing path {name}")
+            elif selected_type == "path-group" and name not in state.path_groups:
+                raise ForwarderError(400, f"{label} references missing path-group {name}")
+
+        for traffic_class, decision in state.steering_active_paths.items():
+            if decision.decision_status == "selected":
+                validate_selected_path(
+                    decision.selected_path, decision.selected_path_type, f"steering decision {traffic_class}"
+                )
+
+        for traffic_class, decision in state.steering_load_balances.items():
+            if decision.decision_status == "selected":
+                for selected in decision.eligible_paths:
+                    validate_selected_path(
+                        selected, decision.selected_path_type, f"load-balance decision {traffic_class}"
+                    )
 
         for ap_id, access_point in state.access_points.items():
             if access_point.bridge_id and access_point.bridge_id not in state.bridges:

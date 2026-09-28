@@ -19,13 +19,18 @@ from .models import (
 
 
 class SecretResolver:
+    """Resolve secret references without inventing placeholder credentials.
+
+    Pamodi's Agent sends WireGuard private keys as file:///var/lib/sdwan-cpe/keys/<tunnel>.private.
+    The Forwarder container must see that same path (shared read-only volume is recommended).
+    """
+
     def __init__(self, root: Path) -> None:
         self.root = root
         self.secrets_file = root / "var/lib/forwarder/secrets.json"
         self.secrets = {}
         if self.secrets_file.exists():
             import json
-
             try:
                 self.secrets = json.loads(self.secrets_file.read_text(encoding="utf-8"))
             except Exception:
@@ -33,11 +38,37 @@ class SecretResolver:
 
     def resolve(self, reference: str | None) -> str:
         if not reference:
-            return ""
+            raise ValueError("secret reference is empty")
+
         if reference in self.secrets:
-            return str(self.secrets[reference])
-        digest = hashlib.sha1(reference.encode("utf-8")).hexdigest()[:12]
-        return f"resolved-{digest}"
+            value = str(self.secrets[reference]).strip()
+            if not value:
+                raise ValueError(f"secret {reference!r} is empty")
+            return value
+
+        if reference.startswith("file://"):
+            path = Path(reference.removeprefix("file://"))
+            if not path.is_absolute():
+                path = self.root / path
+            if not path.exists():
+                raise ValueError(
+                    f"secret file {path} does not exist; share /var/lib/sdwan-cpe/keys "
+                    "between Agent and Forwarder containers"
+                )
+            value = path.read_text(encoding="utf-8").strip()
+            if not value:
+                raise ValueError(f"secret file {path} is empty")
+            return value
+
+        if reference.startswith("env://"):
+            import os
+            name = reference.removeprefix("env://")
+            value = os.getenv(name, "").strip()
+            if not value:
+                raise ValueError(f"environment secret {name!r} is not set")
+            return value
+
+        raise ValueError(f"unresolved secret reference: {reference}")
 
 
 class Renderer:
@@ -160,21 +191,37 @@ class Renderer:
         commands: list[str] = []
 
         for name, interface in sorted(current.interfaces.items()):
-            if interface.kind not in {"bridge", "wireguard"}:
-                commands.append(f"ip link set dev {name} {interface.admin_state}")
-
-            if interface.kind != "wireguard" and interface.mtu:
-                commands.append(f"ip link set mtu {interface.mtu} dev {name}")
-
-            if interface.kind == "wireguard":
+            if interface.kind in {"bridge", "wireguard"}:
                 continue
 
-            # Important:
-            # "ip address replace X dev IFACE" only replaces X if X already exists.
-            # It does not remove previous addresses from the interface.
-            # To make kernel state match forwarder intended state, flush first.
-            commands.append(f"ip address flush dev {name}")
+            # Administrative state is authoritative. A disabled WAN must not keep a DHCP client alive.
+            commands.append(f"ip link set dev {name} {interface.admin_state}")
+            pid_path = f"/run/forwarder/udhcpc-{name}.pid"
 
+            if interface.admin_state == "down":
+                commands.append(
+                    f"if [ -f {pid_path} ]; then kill $(cat {pid_path}) >/dev/null 2>&1 || true; rm -f {pid_path}; fi"
+                )
+                continue
+
+            if interface.mtu:
+                commands.append(f"ip link set mtu {interface.mtu} dev {name}")
+
+            if interface.address_mode == "dhcp" and interface.role == "wan":
+                commands.append("mkdir -p /run/forwarder/dhcp")
+                commands.append(
+                    f"if [ ! -s {pid_path} ] || ! kill -0 $(cat {pid_path}) >/dev/null 2>&1; then "
+                    f"rm -f {pid_path}; "
+                    f"udhcpc -i {name} -p {pid_path} -s /usr/local/sbin/forwarder-udhcpc-script -b -R; "
+                    f"fi"
+                )
+                continue
+
+            # Static/manual addressing: stop a previous DHCP client and make kernel addresses match desired state.
+            commands.append(
+                f"if [ -f {pid_path} ]; then kill $(cat {pid_path}) >/dev/null 2>&1 || true; rm -f {pid_path}; fi"
+            )
+            commands.append(f"ip address flush dev {name}")
             for address in interface.addresses:
                 family_flag = "-6 " if ":" in address else ""
                 commands.append(f"ip {family_flag}address add {address} dev {name}")
@@ -191,7 +238,7 @@ class Renderer:
                 commands.append(f"ip address replace {address} dev {tunnel_id}")
             if tunnel.mtu:
                 commands.append(f"ip link set mtu {tunnel.mtu} dev {tunnel_id}")
-            commands.append(f"wg syncconf {tunnel_id} {conf_path}")
+            commands.append(f"wg syncconf {tunnel_id} {self.root / conf_path}")
             interface = current.interfaces.get(tunnel_id)
             admin_state = interface.admin_state if interface else "up"
             commands.append(f"ip link set dev {tunnel_id} {admin_state}")
@@ -240,7 +287,7 @@ class Renderer:
             commands.append(f"ip rule add fwmark 0x{alloc.packet_mark:x}/0xffffffff lookup {alloc.route_table} priority {alloc.priority}")
 
             if decision.decision_status == "selected" and selected_path:
-                commands.extend(self._route_for_selected_path(selected_path, current, alloc.route_table))
+                commands.extend(self._route_for_selected_path(selected_path, current, alloc.route_table, decision.selected_path_type))
 
         for traffic_class, decision in sorted(current.steering_load_balances.items()):
             if decision.decision_status != "selected" or not decision.eligible_paths:
@@ -255,13 +302,11 @@ class Renderer:
             commands.append(f"ip rule del fwmark 0x{alloc.packet_mark:x}/0xffffffff lookup {alloc.route_table} priority {alloc.priority} || true")
             commands.append(f"ip rule add fwmark 0x{alloc.packet_mark:x}/0xffffffff lookup {alloc.route_table} priority {alloc.priority}")
 
-            nexthops: list[str] = []
-            for path_name in decision.eligible_paths:
-                dev = self._device_for_selected_path(path_name, current)
-                if dev:
-                    nexthops.append(f"nexthop dev {dev} weight 1")
-            if nexthops:
-                commands.append(f"ip route replace default {' '.join(nexthops)} table {alloc.route_table}")
+            commands.extend(
+                self._route_for_dynamic_load_balance(
+                    decision.eligible_paths, current, alloc.route_table, decision.selected_path_type
+                )
+            )
 
         for route_set_id, route_set in sorted(current.static_route_sets.items()):
             for route in route_set.routes:
@@ -358,7 +403,27 @@ class Renderer:
 
         return commands
 
-    def _device_for_selected_path(self, selected_path: str, state: ForwarderState) -> str | None:
+    def _resolve_wan_interface(self, logical_name: str, state: ForwarderState) -> str | None:
+        if logical_name in state.wan_link_map:
+            return state.wan_link_map[logical_name]
+        # Static WAN routes created by the Agent use <WAN>-default and expose out_interface.
+        route_set = state.static_route_sets.get(f"{logical_name}-default")
+        if route_set:
+            for route in route_set.routes:
+                if route.out_interface:
+                    return route.out_interface
+        # If the value already is a real/known interface, keep it.
+        if logical_name in state.interfaces:
+            return logical_name
+        return None
+
+    def _device_for_selected_path(
+        self, selected_path: str, state: ForwarderState, selected_path_type: str | None = None
+    ) -> str | None:
+        if selected_path_type == "wan-link":
+            return self._resolve_wan_interface(selected_path, state)
+        if selected_path_type == "tunnel":
+            return selected_path if selected_path in state.tunnels else None
         if selected_path in state.paths:
             path = state.paths[selected_path]
             return path.tunnel_id if path.type == "wireguard_peer" and path.tunnel_id else path.wan_interface
@@ -366,19 +431,39 @@ class Renderer:
             return selected_path
         if selected_path in state.interfaces:
             return selected_path
-        # Fallback: the agent may send the real Linux interface name directly, e.g. ens7.
-        return selected_path
+        return self._resolve_wan_interface(selected_path, state)
 
-    def _route_for_selected_path(self, selected_path: str, state: ForwarderState, route_table: int) -> list[str]:
+    def _default_route_command(self, dev: str, route_table: int) -> str:
+        # Use the gateway learned by DHCP/static configuration when present.
+        # Falling back to a device-only route is useful for point-to-point links.
+        return (
+            f"GW=$(ip -4 route show table all default dev {dev} 2>/dev/null "
+            f"| awk '/^default/ {{for(i=1;i<=NF;i++) if($i==\"via\"){{print $(i+1); exit}}}}'); "
+            f"if [ -n \"$GW\" ]; then "
+            f"ip route replace default via \"$GW\" dev {dev} onlink table {route_table}; "
+            f"else ip route replace default dev {dev} table {route_table}; fi"
+        )
+
+    def _route_for_selected_path(
+        self, selected_path: str, state: ForwarderState, route_table: int, selected_path_type: str | None = None
+    ) -> list[str]:
         if selected_path in state.paths:
             return self._route_for_path(state.paths[selected_path], state, route_table)
         if selected_path in state.path_groups:
             return self._route_for_group(selected_path, state, route_table)
 
-        dev = self._device_for_selected_path(selected_path, state)
+        dev = self._device_for_selected_path(selected_path, state, selected_path_type)
         if not dev:
-            return []
-        return [f"ip route replace default dev {dev} table {route_table}"]
+            return [f"echo 'unresolved selected path: {selected_path}' >&2; exit 42"]
+        return [self._default_route_command(dev, route_table)]
+
+    def _endpoint_route_command(self, host: str, dev: str) -> str:
+        return (
+            f"GW=$(ip -4 route show table all default dev {dev} 2>/dev/null "
+            f"| awk '/^default/ {{for(i=1;i<=NF;i++) if($i==\"via\"){{print $(i+1); exit}}}}'); "
+            f"if [ -n \"$GW\" ]; then ip route replace {host}/32 via \"$GW\" dev {dev}; "
+            f"else ip route replace {host}/32 dev {dev}; fi"
+        )
 
     def _route_for_path(self, path: ForwardPath, state: ForwarderState, route_table: int) -> list[str]:
         commands: list[str] = []
@@ -386,10 +471,10 @@ class Renderer:
             peer = state.peers.get(path.tunnel_id, {}).get(path.peer_id)
             host = self._endpoint_host(peer.endpoint if peer else None)
             if host:
-                commands.append(f"ip route replace {host}/32 dev {path.wan_interface}")
-            commands.append(f"ip route replace default dev {path.tunnel_id} table {route_table}")
+                commands.append(self._endpoint_route_command(host, path.wan_interface))
+            commands.append(self._default_route_command(path.tunnel_id, route_table))
         else:
-            commands.append(f"ip route replace default dev {path.wan_interface} table {route_table}")
+            commands.append(self._default_route_command(path.wan_interface, route_table))
         return commands
 
     def _route_for_group(self, group_id: str, state: ForwarderState, route_table: int) -> list[str]:
@@ -400,6 +485,7 @@ class Renderer:
             commands.extend(self._route_for_path(active, state, route_table))
             return commands
 
+        # Weighted ECMP paths are explicit Forwarder paths, so their wan_interface is already a Linux interface.
         nexthops: list[str] = []
         for member in group.members:
             path = state.paths[member.path_id]
@@ -410,30 +496,44 @@ class Renderer:
             commands.append(f"ip route replace default {' '.join(nexthops)} table {route_table}")
         return commands
 
-    def _route_for_dynamic_load_balance(self, path_ids: list[str], state: ForwarderState, route_table: int) -> list[str]:
-        nexthops: list[str] = []
-        for path_id in path_ids:
-            path = state.paths[path_id]
-            dev = path.tunnel_id if path.type == "wireguard_peer" and path.tunnel_id else path.wan_interface
-            nexthops.append(f"nexthop dev {dev} weight 1")
-        if not nexthops:
-            return []
-        return [f"ip route replace default {' '.join(nexthops)} table {route_table}"]
+    def _route_for_dynamic_load_balance(
+        self, selected_paths: list[str], state: ForwarderState, route_table: int, selected_path_type: str | None = None
+    ) -> list[str]:
+        devices: list[str] = []
+        for selected in selected_paths:
+            dev = self._device_for_selected_path(selected, state, selected_path_type)
+            if dev:
+                devices.append(dev)
+        if not devices:
+            return ["echo 'no resolvable load-balance paths' >&2; exit 42"]
+
+        # Build a gateway-aware multipath route at apply time.
+        parts = ["ROUTE='ip route replace default'"]
+        for dev in devices:
+            parts.append(
+                f"GW=$(ip -4 route show table all default dev {dev} 2>/dev/null "
+                f"| awk '/^default/ {{for(i=1;i<=NF;i++) if($i==\"via\"){{print $(i+1); exit}}}}')"
+            )
+            parts.append(
+                f"if [ -n \"$GW\" ]; then ROUTE=\"$ROUTE nexthop via $GW dev {dev} weight 1\"; "
+                f"else ROUTE=\"$ROUTE nexthop dev {dev} weight 1\"; fi"
+            )
+        parts.append(f"eval \"$ROUTE table {route_table}\"")
+        return ["; ".join(parts)]
 
     def _can_route_direct(self, selected_path: str | None, state: ForwarderState) -> bool:
         if not selected_path:
             return False
-        return selected_path in state.interfaces or selected_path in state.tunnels
+        return selected_path in state.interfaces or selected_path in state.tunnels or selected_path in state.wan_link_map
 
     def _wireguard_config(self, tunnel_id: str, tunnel, peers: dict) -> str:
+        # wg syncconf accepts wg(8) configuration, not wg-quick directives.
+        # Address and MTU are therefore applied with `ip` in _render_tunnels, not written here.
         lines = ["[Interface]"]
-        if tunnel.private_key_ref:
-            lines.append(f"PrivateKey = {self.secrets.resolve(tunnel.private_key_ref)}")
+        if not tunnel.private_key_ref:
+            raise ValueError(f"WireGuard tunnel {tunnel_id} has no private_key_ref")
+        lines.append(f"PrivateKey = {self.secrets.resolve(tunnel.private_key_ref)}")
         lines.append(f"ListenPort = {tunnel.listen_port}")
-        for address in tunnel.local_addresses:
-            lines.append(f"Address = {address}")
-        if tunnel.mtu:
-            lines.append(f"MTU = {tunnel.mtu}")
 
         for peer_id, peer in sorted(peers.items()):
             lines.extend(["", "[Peer]"])

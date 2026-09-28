@@ -8,7 +8,6 @@ from fastapi import FastAPI, Request, Response
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 
-from .pamodi_compat_api import router as pamodi_compat_router
 from .models import (
     AccessPoint,
     Bridge,
@@ -30,7 +29,6 @@ from .models import (
     WireGuardTunnel,
 )
 from .service import ForwarderError, ForwarderService
-from .state import ForwarderStateStore
 
 
 def create_app(
@@ -50,15 +48,9 @@ def create_app(
         use_system_state=use_system_state,
     )
 
-    # Legacy store solo para pamodi_compat_api.py.
-    # La API formal /api/v1 usa ForwarderService.
-    legacy_store = ForwarderStateStore()
-
     app = FastAPI(title="SD-WAN Forwarder API", version=service.version)
     app.state.root = root_path
     app.state.service = service
-    app.state.store = legacy_store
-    app.include_router(pamodi_compat_router)
 
     @app.exception_handler(ForwarderError)
     async def handle_forwarder_error(_: Request, exc: ForwarderError) -> JSONResponse:

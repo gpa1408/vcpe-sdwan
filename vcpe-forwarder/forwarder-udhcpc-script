@@ -1,0 +1,78 @@
+#!/bin/sh
+# BusyBox udhcpc hook for Forwarder-managed WANs.
+# It installs the lease on the interface and keeps each WAN default route in a
+# dedicated table instead of selecting WAN preference with metrics in main.
+set -u
+
+IFACE="${interface:?udhcpc did not provide interface}"
+RUN_DIR=/run/forwarder/dhcp
+mkdir -p "$RUN_DIR"
+LEASE_FILE="$RUN_DIR/${IFACE}.env"
+
+# Stable table in 20000..29999 based on interface name.
+CKSUM=$(printf '%s' "$IFACE" | cksum | awk '{print $1}')
+TABLE=$((20000 + (CKSUM % 10000)))
+PRIORITY=$TABLE
+
+cleanup_old_rule() {
+    if [ -f "$LEASE_FILE" ]; then
+        OLD_IP=$(sed -n 's/^IP=//p' "$LEASE_FILE" | head -n1)
+        if [ -n "${OLD_IP:-}" ]; then
+            ip rule del from "$OLD_IP/32" table "$TABLE" priority "$PRIORITY" 2>/dev/null || true
+        fi
+    fi
+}
+
+case "${1:-}" in
+    deconfig)
+        cleanup_old_rule
+        ip -4 addr flush dev "$IFACE" 2>/dev/null || true
+        ip -4 route flush table "$TABLE" 2>/dev/null || true
+        rm -f "$LEASE_FILE"
+        ;;
+
+    bound|renew)
+        cleanup_old_rule
+
+        PREFIX=32
+        if [ -n "${subnet:-}" ]; then
+            PREFIX=$(python3 - "$subnet" <<'PY'
+import ipaddress, sys
+print(ipaddress.IPv4Network("0.0.0.0/" + sys.argv[1]).prefixlen)
+PY
+)
+        fi
+
+        ip link set dev "$IFACE" up
+        ip -4 addr flush dev "$IFACE"
+        ip -4 addr add "$ip/$PREFIX" dev "$IFACE"
+
+        ip -4 route flush table "$TABLE" 2>/dev/null || true
+
+        NETWORK=$(python3 - "$ip" "$PREFIX" <<'PY'
+import ipaddress, sys
+print(ipaddress.IPv4Interface(f"{sys.argv[1]}/{sys.argv[2]}").network)
+PY
+)
+        ip -4 route replace "$NETWORK" dev "$IFACE" src "$ip" table "$TABLE"
+
+        ROUTER=$(printf '%s\n' "${router:-}" | awk '{print $1}')
+        if [ -n "$ROUTER" ]; then
+            ip -4 route replace default via "$ROUTER" dev "$IFACE" onlink table "$TABLE"
+        fi
+
+        ip rule del from "$ip/32" table "$TABLE" priority "$PRIORITY" 2>/dev/null || true
+        ip rule add from "$ip/32" table "$TABLE" priority "$PRIORITY"
+
+        {
+            echo "IP=$ip"
+            echo "PREFIX=$PREFIX"
+            echo "ROUTER=$ROUTER"
+            echo "TABLE=$TABLE"
+            echo "DNS=${dns:-}"
+            echo "LEASE=${lease:-}"
+        } > "$LEASE_FILE"
+        ;;
+esac
+
+exit 0
