@@ -28,6 +28,19 @@ class Agent:
         self.metric_reader = MetricReader()    
         
         self.current_config_cache = {}
+        self.latest_flow_state_map = {}                                               # latest per traffic class/WAN metric snapshot
+        self.latest_tunnel_state_map = {}                                             # latest per tunnel metric snapshot
+
+        self.latest_cpe_state = {                                      # runtime-only overall CPE operational snapshot
+            "oper-status": "unknown",
+            "power-status": "powered-on",
+            "forwarder-status": "unknown",
+            "forwarder-version": None,
+            "uptime-seconds": 0,
+            "last-seen": None,
+            "status-reason": "CPE state not evaluated yet" }
+        
+        self.agent_start_time = time.time()                            # used to calculate Agent runtime uptime
         
         self.generated_tunnel_keys = {}                                               # stores generated WireGuard keys during the current agent runtime
         self.wan_nat_types = {}                                                       # latest discovered NAT type for each WAN link
@@ -213,6 +226,48 @@ class Agent:
                 "ipv4-address": None,                                             # do not expose stale IP on failure
                 "oper-status": "down"                                             # failed state lookup is treated as unavailable
             }
+
+    def _update_cpe_state(self):
+        now_ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    
+        forwarder_status = "down"
+        forwarder_version = None
+        status_reason = "Forwarder is unreachable"
+    
+        try:
+            response = requests.get(
+                f"{self.forwarder_base_url}/api/v1/health",
+                headers={"Accept": "application/json"},
+                timeout=5
+            )
+    
+            response.raise_for_status()
+    
+            data = response.json()
+    
+            forwarder_status = "healthy"
+            forwarder_version = data.get("version")
+            status_reason = "CPE agent and forwarder are operational"
+    
+        except Exception as e:
+            logging.warning("Forwarder health check failed: %s", e)
+    
+        if forwarder_status == "healthy":
+            oper_status = "up"
+        elif forwarder_status == "down":
+            oper_status = "degraded"
+        else:
+            oper_status = "unknown"
+    
+        self.latest_cpe_state = {
+            "oper-status": oper_status,
+            "power-status": "powered-on",
+            "forwarder-status": forwarder_status,
+            "forwarder-version": forwarder_version,
+            "uptime-seconds": int(time.time() - self.agent_start_time),
+            "last-seen": now_ts,
+            "status-reason": status_reason
+        }
     # =====================================================================================
     # Controller Annoucements
     # =====================================================================================
@@ -448,13 +503,13 @@ class Agent:
         
     def build_operational_state_xml(self):
         current_config = self.current_config_cache                                        # use cached config to avoid recursive RESTCONF call
+        flow_state_map = self.latest_flow_state_map
+        tunnel_state_map = self.latest_tunnel_state_map
 
         if not current_config:
             return '<sdwan xmlns="urn:sdwan:cpe"/>'
     
-        xml_parts = [
-            '<sdwan xmlns="urn:sdwan:cpe">'
-        ]                                                                                 # start top-level sdwan tree
+        xml_parts = ['<sdwan xmlns="urn:sdwan:cpe">']                                      # start top-level sdwan tree
     
         # =================================================================================
         # Tunnel operational information
@@ -547,6 +602,176 @@ class Agent:
                 )                                                                          # expose latest runtime NAT discovery result
     
             xml_parts.append("</wan-link-state>")                                          # close WAN operational-state entry
+
+        # =================================================================================
+        # Per traffic-class / WAN-link monitoring state
+        # =================================================================================
+
+        for traffic_class, wan_states in flow_state_map.items():
+
+            for wan_name, metric_state in wan_states.items():
+
+                if not traffic_class or not wan_name:
+                    continue
+
+                xml_parts.append("<flow-state>")
+
+                xml_parts.append(
+                    f"<class>{escape(str(traffic_class))}</class>"
+                )
+
+                xml_parts.append(
+                    f"<wan-link>{escape(str(wan_name))}</wan-link>"
+                )
+
+                flow_id = metric_state.get("flow-id")
+                if flow_id is not None:
+                    xml_parts.append(
+                        f"<flow-id>{int(flow_id)}</flow-id>"
+                    )
+
+                oper_status = metric_state.get("oper-status")
+                if oper_status:
+                    xml_parts.append(
+                        f"<oper-status>{escape(str(oper_status))}</oper-status>"
+                    )
+
+                latency = metric_state.get("latency-ms")
+                if latency is not None:
+                    xml_parts.append(
+                        f"<latency-ms>{int(latency)}</latency-ms>"
+                    )
+
+                jitter = metric_state.get("jitter-ms")
+                if jitter is not None:
+                    xml_parts.append(
+                        f"<jitter-ms>{int(jitter)}</jitter-ms>"
+                    )
+
+                loss = metric_state.get("loss-percent")
+                if loss is not None:
+                    xml_parts.append(
+                        f"<loss-percent>{loss}</loss-percent>"
+                    )
+
+                bandwidth = metric_state.get("available-bandwidth-kbps")
+                if bandwidth is not None:
+                    xml_parts.append(
+                        f"<available-bandwidth-kbps>{int(bandwidth)}</available-bandwidth-kbps>"
+                    )
+
+                timestamp = metric_state.get("metric-timestamp")
+                if timestamp:
+                    xml_parts.append(
+                        f"<last-updated>{escape(str(timestamp))}</last-updated>"
+                    )
+
+                xml_parts.append("</flow-state>")
+
+        # =================================================================================
+        # Tunnel monitoring state
+        # =================================================================================
+
+        for tunnel_name, metric_state in tunnel_state_map.items():
+
+            if not tunnel_name:
+                continue
+
+            xml_parts.append("<tunnel-state>")
+
+            xml_parts.append(
+                f"<name>{escape(str(tunnel_name))}</name>"
+            )
+
+            oper_status = metric_state.get("oper-status")
+            if oper_status:
+                xml_parts.append(
+                    f"<oper-status>{escape(str(oper_status))}</oper-status>"
+                )
+
+            latency = metric_state.get("latency-ms")
+            if latency is not None:
+                xml_parts.append(
+                    f"<latency-ms>{int(latency)}</latency-ms>"
+                )
+
+            jitter = metric_state.get("jitter-ms")
+            if jitter is not None:
+                xml_parts.append(
+                    f"<jitter-ms>{int(jitter)}</jitter-ms>"
+                )
+
+            loss = metric_state.get("loss-percent")
+            if loss is not None:
+                xml_parts.append(
+                    f"<loss-percent>{loss}</loss-percent>"
+                )
+
+            bandwidth = metric_state.get("available-bandwidth-kbps")
+            if bandwidth is not None:
+                xml_parts.append(
+                    f"<available-bandwidth-kbps>{int(bandwidth)}</available-bandwidth-kbps>"
+                )
+
+            timestamp = metric_state.get("metric-timestamp")
+            if timestamp:
+                xml_parts.append(
+                    f"<last-updated>{escape(str(timestamp))}</last-updated>"
+                )
+
+            xml_parts.append("</tunnel-state>")
+
+        # =================================================================================
+        # Overall CPE operational state
+        # =================================================================================
+
+        cpe_state = self.latest_cpe_state
+
+        xml_parts.append("<cpe-state>")
+
+        oper_status = cpe_state.get("oper-status")
+        if oper_status:
+            xml_parts.append(
+                f"<oper-status>{escape(str(oper_status))}</oper-status>"
+            )
+
+        power_status = cpe_state.get("power-status")
+        if power_status:
+            xml_parts.append(
+                f"<power-status>{escape(str(power_status))}</power-status>"
+            )
+
+        forwarder_status = cpe_state.get("forwarder-status")
+        if forwarder_status:
+            xml_parts.append(
+                f"<forwarder-status>{escape(str(forwarder_status))}</forwarder-status>"
+            )
+
+        forwarder_version = cpe_state.get("forwarder-version")
+        if forwarder_version:
+            xml_parts.append(
+                f"<forwarder-version>{escape(str(forwarder_version))}</forwarder-version>"
+            )
+
+        uptime = cpe_state.get("uptime-seconds")
+        if uptime is not None:
+            xml_parts.append(
+                f"<uptime-seconds>{int(uptime)}</uptime-seconds>"
+            )
+
+        last_seen = cpe_state.get("last-seen")
+        if last_seen:
+            xml_parts.append(
+                f"<last-seen>{escape(str(last_seen))}</last-seen>"
+            )
+
+        status_reason = cpe_state.get("status-reason")
+        if status_reason:
+            xml_parts.append(
+                f"<status-reason>{escape(str(status_reason))}</status-reason>"
+            )
+
+        xml_parts.append("</cpe-state>")
     
         xml_parts.append("</state>")                                                       # close operational-state container
         xml_parts.append("</sdwan>")                                                       # close top-level YANG container
@@ -1639,6 +1864,7 @@ class Agent:
         self.current_config_cache = current_config
 
         self.check_wan_ip_changes()                                                         # detect changed WAN endpoint and notify controller
+        self._update_cpe_state()
     
         if not hasattr(self, "metric_reader"):
             logging.warning("metric_reader not configured")
@@ -1720,6 +1946,9 @@ class Agent:
             flow_state_map,
             tunnel_state_map
         )                                                                                   # make steering decisions using flow and tunnel states
+
+        self.latest_flow_state_map = flow_state_map                                         # replace previous current flow metric snapshot & expose latest underlay flow metrics through YANG state
+        self.latest_tunnel_state_map = tunnel_state_map                                     # replace previous current tunnel metric snapshot & expose latest underlay flow metrics through YANG state
     
         steering_operations = self._build_steering_operations(steering_decisions)            # convert decisions to forwarder operations
     
