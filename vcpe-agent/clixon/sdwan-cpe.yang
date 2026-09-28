@@ -935,6 +935,11 @@
           description
             "Estimated available bandwidth";
         }
+        leaf last-updated {
+          type yang:date-and-time;
+          description
+            "Timestamp of the latest tunnel monitoring sample.";
+        }
 
         leaf-list active-class {
           type leafref {
