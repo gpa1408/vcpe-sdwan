@@ -1,7 +1,19 @@
 #!/bin/sh
-# BusyBox udhcpc hook for Forwarder-managed WANs.
-# It installs the lease on the interface and keeps each WAN default route in a
-# dedicated table instead of selecting WAN preference with metrics in main.
+# Forwarder-managed DHCP hook for WAN interfaces.
+#
+# Responsibilities:
+#   - Apply DHCP IPv4 address to the requested WAN.
+#   - Keep one dedicated routing table per WAN.
+#   - Add source-policy routing so traffic bound to a WAN uses that WAN.
+#   - Keep ONE management default route in main (default: ens5) so the vCPE host
+#     can reach Git/apt/Docker without interfering with SD-WAN fwmark tables.
+#   - Persist DHCP information (including DNS) for observability.
+#
+# IMPORTANT:
+# DNS for the HOST OS is intentionally not written here. This script runs inside
+# the Forwarder container. Host DNS (/etc/resolv.conf/systemd-resolved) is host
+# userspace configuration, not kernel dataplane state.
+
 set -u
 
 IFACE="${interface:?udhcpc did not provide interface}"
@@ -14,6 +26,13 @@ CKSUM=$(printf '%s' "$IFACE" | cksum | awk '{print $1}')
 TABLE=$((20000 + (CKSUM % 10000)))
 PRIORITY=$TABLE
 
+# Only this WAN gets a default route in the main table for management traffic.
+# Override in docker-compose if needed:
+#   MANAGEMENT_WAN_INTERFACE=ens5
+#   MANAGEMENT_WAN_METRIC=1000
+MGMT_IFACE="${MANAGEMENT_WAN_INTERFACE:-ens5}"
+MGMT_METRIC="${MANAGEMENT_WAN_METRIC:-1000}"
+
 cleanup_old_rule() {
     if [ -f "$LEASE_FILE" ]; then
         OLD_IP=$(sed -n 's/^IP=//p' "$LEASE_FILE" | head -n1)
@@ -23,11 +42,21 @@ cleanup_old_rule() {
     fi
 }
 
+cleanup_management_default() {
+    if [ "$IFACE" = "$MGMT_IFACE" ]; then
+        # Remove only the management default we own.
+        ip -4 route del default dev "$IFACE" metric "$MGMT_METRIC" 2>/dev/null || true
+    fi
+}
+
 case "${1:-}" in
     deconfig)
+        cleanup_management_default
         cleanup_old_rule
+
         ip -4 addr flush dev "$IFACE" 2>/dev/null || true
         ip -4 route flush table "$TABLE" 2>/dev/null || true
+
         rm -f "$LEASE_FILE"
         ;;
 
@@ -37,30 +66,44 @@ case "${1:-}" in
         PREFIX=32
         if [ -n "${subnet:-}" ]; then
             PREFIX=$(python3 - "$subnet" <<'PY'
-import ipaddress, sys
+import ipaddress
+import sys
 print(ipaddress.IPv4Network("0.0.0.0/" + sys.argv[1]).prefixlen)
 PY
 )
         fi
 
         ip link set dev "$IFACE" up
+
+        # Make kernel IPv4 state match the DHCP lease.
         ip -4 addr flush dev "$IFACE"
         ip -4 addr add "$ip/$PREFIX" dev "$IFACE"
 
+        # Rebuild this WAN's dedicated routing table.
         ip -4 route flush table "$TABLE" 2>/dev/null || true
 
         NETWORK=$(python3 - "$ip" "$PREFIX" <<'PY'
-import ipaddress, sys
+import ipaddress
+import sys
 print(ipaddress.IPv4Interface(f"{sys.argv[1]}/{sys.argv[2]}").network)
 PY
 )
         ip -4 route replace "$NETWORK" dev "$IFACE" src "$ip" table "$TABLE"
 
         ROUTER=$(printf '%s\n' "${router:-}" | awk '{print $1}')
+
         if [ -n "$ROUTER" ]; then
+            # WAN-specific default used by source-policy routing / WAN-bound traffic.
             ip -4 route replace default via "$ROUTER" dev "$IFACE" onlink table "$TABLE"
+
+            # A single low-priority management default in main.
+            # SD-WAN fwmark rules still take precedence over main.
+            if [ "$IFACE" = "$MGMT_IFACE" ]; then
+                ip -4 route replace default via "$ROUTER" dev "$IFACE" metric "$MGMT_METRIC"
+            fi
         fi
 
+        # Traffic already bound to this WAN source IP must use this WAN's table.
         ip rule del from "$ip/32" table "$TABLE" priority "$PRIORITY" 2>/dev/null || true
         ip rule add from "$ip/32" table "$TABLE" priority "$PRIORITY"
 
