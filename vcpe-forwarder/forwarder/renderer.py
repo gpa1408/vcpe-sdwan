@@ -311,6 +311,9 @@ class Renderer:
 
         for route_set_id, route_set in sorted(current.static_route_sets.items()):
             for route in route_set.routes:
+                if route.out_interface and not self._interface_is_usable_for_routing(route.out_interface, current):
+                    continue
+
                 route_cmd = ["ip route replace", route.destination_cidr]
                 if route.next_hop_ip:
                     route_cmd.append(f"via {route.next_hop_ip}")
@@ -418,6 +421,29 @@ class Renderer:
             return logical_name
         return None
 
+    def _interface_is_usable_for_routing(self, dev: str, state: ForwarderState) -> bool:
+        """
+        Return False when Forwarder desired state explicitly marks an interface DOWN.
+
+        The renderer reapplies the complete desired state on every transaction. Without
+        this guard, the interfaces phase can correctly bring a WAN down and the routing
+        phase can immediately try to recreate a route through that same disabled WAN,
+        causing the whole transaction to fail.
+        """
+        interface = state.interfaces.get(dev)
+        if interface is None:
+            # The device may be external/unmanaged by the Forwarder. Do not reject it
+            # solely because it is absent from state.interfaces.
+            return True
+        return interface.admin_state != "down"
+
+    def _unreachable_default_command(self, route_table: int) -> str:
+        """
+        Keep policy-routing traffic from falling through to later rules (including main)
+        when its selected WAN/tunnel is administratively unavailable.
+        """
+        return f"ip route replace unreachable default table {route_table}"
+
     def _device_for_selected_path(
         self, selected_path: str, state: ForwarderState, selected_path_type: str | None = None
     ) -> str | None:
@@ -456,6 +482,10 @@ class Renderer:
         dev = self._device_for_selected_path(selected_path, state, selected_path_type)
         if not dev:
             return [f"echo 'unresolved selected path: {selected_path}' >&2; exit 42"]
+
+        if not self._interface_is_usable_for_routing(dev, state):
+            return [self._unreachable_default_command(route_table)]
+
         return [self._default_route_command(dev, route_table)]
 
     def _endpoint_route_command(self, host: str, dev: str) -> str:
@@ -468,33 +498,56 @@ class Renderer:
 
     def _route_for_path(self, path: ForwardPath, state: ForwarderState, route_table: int) -> list[str]:
         commands: list[str] = []
+
         if path.type == "wireguard_peer" and path.tunnel_id and path.peer_id:
+            if not self._interface_is_usable_for_routing(path.wan_interface, state):
+                return [self._unreachable_default_command(route_table)]
+            if not self._interface_is_usable_for_routing(path.tunnel_id, state):
+                return [self._unreachable_default_command(route_table)]
+
             peer = state.peers.get(path.tunnel_id, {}).get(path.peer_id)
             host = self._endpoint_host(peer.endpoint if peer else None)
             if host:
                 commands.append(self._endpoint_route_command(host, path.wan_interface))
             commands.append(self._default_route_command(path.tunnel_id, route_table))
         else:
+            if not self._interface_is_usable_for_routing(path.wan_interface, state):
+                return [self._unreachable_default_command(route_table)]
             commands.append(self._default_route_command(path.wan_interface, route_table))
+
         return commands
 
     def _route_for_group(self, group_id: str, state: ForwarderState, route_table: int) -> list[str]:
         group = state.path_groups[group_id]
         commands: list[str] = []
+
         if group.strategy == "ordered_failover" and group.active_path_id:
             active = state.paths[group.active_path_id]
             commands.extend(self._route_for_path(active, state, route_table))
             return commands
 
-        # Weighted ECMP paths are explicit Forwarder paths, so their wan_interface is already a Linux interface.
         nexthops: list[str] = []
         for member in group.members:
             path = state.paths[member.path_id]
             weight = member.weight or 1
-            dev = path.tunnel_id if path.type == "wireguard_peer" and path.tunnel_id else path.wan_interface
+
+            if path.type == "wireguard_peer" and path.tunnel_id:
+                if not self._interface_is_usable_for_routing(path.wan_interface, state):
+                    continue
+                dev = path.tunnel_id
+            else:
+                dev = path.wan_interface
+
+            if not self._interface_is_usable_for_routing(dev, state):
+                continue
+
             nexthops.append(f"nexthop dev {dev} weight {weight}")
+
         if nexthops:
             commands.append(f"ip route replace default table {route_table} {' '.join(nexthops)}")
+        else:
+            commands.append(self._unreachable_default_command(route_table))
+
         return commands
 
     def _route_for_dynamic_load_balance(
@@ -503,15 +556,15 @@ class Renderer:
         devices: list[str] = []
         for selected in selected_paths:
             dev = self._device_for_selected_path(selected, state, selected_path_type)
-            if dev:
+            if dev and self._interface_is_usable_for_routing(dev, state):
                 devices.append(dev)
+
         if not devices:
-            return ["echo 'no resolvable load-balance paths' >&2; exit 42"]
+            return [self._unreachable_default_command(route_table)]
 
         # Build a gateway-aware multipath route at apply time.
         # IMPORTANT: the routing table belongs to the route itself and must be
-        # placed before the multipath nexthop blocks.  Appending "table N"
-        # after the nexthops makes iproute2 reject the command.
+        # placed before the multipath nexthop blocks.
         parts = [f"ROUTE='ip route replace default table {route_table}'"]
         for dev in devices:
             parts.append(
