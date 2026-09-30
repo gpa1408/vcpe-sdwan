@@ -856,7 +856,8 @@ class ForwarderService:
                             break
                 return OperationOutcome(200, "configured", route_set)
             if method == "DELETE":
-                self._require_mapping_item(state.static_route_sets, route_set_id, "static route set")
+                # Keep DELETE idempotent. Startup reconciliation may ask to remove a
+                # stale static default even when no such object exists yet.
                 state.static_route_sets.pop(route_set_id, None)
                 return OperationOutcome(204, "deleted")
 

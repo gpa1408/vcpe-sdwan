@@ -202,6 +202,12 @@ class Renderer:
                 commands.append(
                     f"if [ -f {pid_path} ]; then kill $(cat {pid_path}) >/dev/null 2>&1 || true; rm -f {pid_path}; fi"
                 )
+                # Killing udhcpc does not reliably emit a deconfig event. Run the
+                # hook explicitly so the DHCP address, source rule, dedicated table
+                # and management default owned by this WAN are removed as well.
+                commands.append(
+                    f"interface={name} /usr/local/sbin/forwarder-udhcpc-script deconfig >/dev/null 2>&1 || true"
+                )
                 continue
 
             if interface.mtu:
