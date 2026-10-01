@@ -268,6 +268,34 @@ class Agent:
             "last-seen": now_ts,
             "status-reason": status_reason
         }
+
+    def _wait_for_wan_ready(self, wan, timeout_sec=30):
+        wan_name = wan.get("name")
+        interface_name = wan.get("interface-name")
+        role = wan.get("role")
+    
+        if not wan_name or not interface_name:
+            return
+    
+        logging.info("Waiting for WAN %s interface %s to obtain IPv4", wan_name, interface_name)
+    
+        start_time = time.time()
+    
+        while time.time() - start_time < timeout_sec:
+            interface_state = self._get_forwarder_interface_state(interface_name)
+            ipv4_address = interface_state.get("ipv4-address")
+    
+            if ipv4_address:
+                logging.info("WAN %s is ready with IPv4=%s", wan_name, ipv4_address)
+    
+                self.wan_last_ipv4[wan_name] = ipv4_address
+                self.detect_nat_type(wan_name, interface_name, role )                         # NAT detection only after IPv4 exists
+                self._announce_to_controller()                                              # controller registration only after WAN is usable
+                return 
+            time.sleep(2)                                                                   # allow DHCP time to complete
+    
+        logging.warning("WAN %s did not obtain IPv4 within %s seconds", wan_name, timeout_sec)
+        
     # =====================================================================================
     # Controller Annoucements
     # =====================================================================================
@@ -1666,12 +1694,14 @@ class Agent:
             operations=operations,
             validate_only=validate_only)
 
-        if phase == "commit":                                                              # NAT detection is triggered only after the config is committed
+        if phase == "commit":
             for wan in nat_detection_candidates:
-                self.detect_nat_type(
-                    wan.get("name"),
-                    wan.get("interface-name"),
-                    wan.get("role"))                                                       # rediscover NAT only for the changed WAN
+        
+                threading.Thread(
+                    target=self._wait_for_wan_ready,
+                    args=(wan,),
+                    daemon=True
+                ).start()                                                                       # wait for DHCP without blocking Clixon commit
 
             for item in monitoring_start_candidates:                                        # start/update monitoring only after real commit
                 self._start_monitoring_for_object(                              
