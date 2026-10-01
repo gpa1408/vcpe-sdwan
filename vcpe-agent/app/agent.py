@@ -275,27 +275,72 @@ class Agent:
         role = wan.get("role")
     
         if not wan_name or not interface_name:
+            logging.warning(
+                "WAN readiness check skipped because WAN name or interface is missing"
+            )
             return
     
-        logging.info("Waiting for WAN %s interface %s to obtain IPv4", wan_name, interface_name)
+        logging.info(
+            "Waiting for WAN %s interface %s to obtain IPv4",
+            wan_name,
+            interface_name
+        )
     
         start_time = time.time()
     
-        while time.time() - start_time < timeout_sec:
-            interface_state = self._get_forwarder_interface_state(interface_name)
-            ipv4_address = interface_state.get("ipv4-address")
+        try:
+            while time.time() - start_time < timeout_sec:
     
-            if ipv4_address:
-                logging.info("WAN %s is ready with IPv4=%s", wan_name, ipv4_address)
+                interface_state = self._get_forwarder_interface_state(
+                    interface_name
+                )
     
-                self.wan_last_ipv4[wan_name] = ipv4_address
-                self.detect_nat_type(wan_name, interface_name, role )                         # NAT detection only after IPv4 exists
-                self._announce_to_controller()                                              # controller registration only after WAN is usable
-                return 
-            time.sleep(2)                                                                   # allow DHCP time to complete
+                ipv4_address = interface_state.get("ipv4-address")
     
-        logging.warning("WAN %s did not obtain IPv4 within %s seconds", wan_name, timeout_sec)
-        
+                logging.info(
+                    "WAN readiness poll: wan=%s interface=%s ipv4=%s oper-status=%s",
+                    wan_name,
+                    interface_name,
+                    ipv4_address,
+                    interface_state.get("oper-status")
+                )
+    
+                if ipv4_address:
+                    logging.info(
+                        "WAN %s is ready with IPv4=%s",
+                        wan_name,
+                        ipv4_address
+                    )
+    
+                    self.wan_last_ipv4[wan_name] = ipv4_address
+    
+                    self.detect_nat_type(
+                        wan_name,
+                        interface_name,
+                        role
+                    )
+    
+                    self._announce_to_controller()
+    
+                    return
+    
+                time.sleep(2)
+    
+            logging.warning(
+                "WAN %s interface %s did not obtain IPv4 within %s seconds",
+                wan_name,
+                interface_name,
+                timeout_sec
+            )
+    
+        except Exception as e:
+            logging.exception(
+                "WAN readiness thread failed for WAN %s interface %s: %s",
+                wan_name,
+                interface_name,
+                e
+            )
+            
     # =====================================================================================
     # Controller Annoucements
     # =====================================================================================
