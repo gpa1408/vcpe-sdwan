@@ -1263,32 +1263,115 @@ class Agent:
         return match
 
     def _build_operations_from_object(self, object_type, parent_dict, changed_leafs, delete=False):
+    
         if object_type == "wan-link":
-            return self._build_wan_link_operations(parent_dict, changed_leafs, delete)
-
-        if object_type == "lan-link":
-            return self._build_lan_link_operations(parent_dict, changed_leafs, delete)
-
-        if object_type == "lan":                                                                     # Clixon may report the whole LAN container as added/deleted when the first or last lan-link is added/deleted.
-            operations = []
-            for lan_link in self._as_list(parent_dict.get("lan-link")):
+            return self._build_wan_link_operations(
+                parent_dict,
+                changed_leafs,
+                delete   )                                                                                       # direct WAN-link object
+    
+        if object_type == "underlay":
+            operations = []                                                                         # stores operations from all WAN links inside underlay
+    
+            for wan_link in self._as_list(parent_dict.get("wan-link")):                             # loop through WAN links inside underlay
+                if not isinstance(wan_link, dict):
+                    continue                                                                        # skip invalid WAN-link objects
+    
+                operations.extend(
+                    self._build_wan_link_operations(
+                        wan_link,
+                        changed_leafs,
+                        delete
+                    )
+                )                                                                                   # build Forwarder operations for each WAN link
+    
+            return operations                                                                       # return all generated WAN operations
+    
+        if object_type == "interfaces":
+            operations = []                                                                         # stores operations from nested WAN/LAN objects
+    
+            underlay = parent_dict.get("underlay") or {}                                             # get underlay container safely
+    
+            for wan_link in self._as_list(underlay.get("wan-link")):                                 # loop through WAN links inside interfaces/underlay
+                if not isinstance(wan_link, dict):
+                    continue                                                                         # skip invalid WAN-link objects
+    
+                operations.extend(
+                    self._build_wan_link_operations(
+                        wan_link,
+                        changed_leafs,
+                        delete
+                    )
+                )                                                                                   # build Forwarder operations for nested WAN link
+    
+            lan = parent_dict.get("lan") or {}                                                       # get LAN container safely
+    
+            for lan_link in self._as_list(lan.get("lan-link")):                                      # loop through LAN links inside interfaces/lan
                 if not isinstance(lan_link, dict):
-                    continue
-                operations.extend(self._build_lan_link_operations(lan_link, changed_leafs, delete))
-            return operations
-
+                    continue                                                                         # skip invalid LAN-link objects
+    
+                operations.extend(
+                    self._build_lan_link_operations(
+                        lan_link,
+                        changed_leafs,
+                        delete
+                    )
+                )                                                                                    # build Forwarder operations for nested LAN link
+    
+            return operations                                                                        # return all WAN/LAN operations
+    
+        if object_type == "lan-link":
+            return self._build_lan_link_operations(
+                parent_dict,
+                changed_leafs,
+                delete
+            )                                                                                        # direct LAN-link object
+    
+        if object_type == "lan":
+            operations = []                                                                          # stores operations from all LAN links inside lan container
+    
+            for lan_link in self._as_list(parent_dict.get("lan-link")):                              # loop through LAN links
+                if not isinstance(lan_link, dict):
+                    continue                                                                         # skip invalid LAN-link objects
+    
+                operations.extend(
+                    self._build_lan_link_operations(
+                        lan_link,
+                        changed_leafs,
+                        delete
+                    )
+                )                                                                                   # build Forwarder operations for each LAN link
+    
+            return operations                                                                       # return all generated LAN operations
+    
         if object_type == "tunnel":
-            return self._build_tunnel_operations(parent_dict, changed_leafs, delete)
-
+            return self._build_tunnel_operations(
+                parent_dict,
+                changed_leafs,
+                delete
+            )                                                                                       # WireGuard tunnel object
+    
         if object_type == "rule":
-            return self._build_firewall_rule_operations(parent_dict, changed_leafs, delete)
-
+            return self._build_firewall_rule_operations(
+                parent_dict,
+                changed_leafs,
+                delete
+            )                                                                                       # firewall rule object
+    
         if object_type == "class":
-            return self._build_traffic_class_operations(parent_dict, changed_leafs, delete)
-
-        logging.info("No forwarder mapping yet for object type=%s, changed_leafs=%s",
-                     object_type, changed_leafs)
-        return []
+            return self._build_traffic_class_operations(
+                parent_dict,
+                changed_leafs,
+                delete
+            )                                                                                       # traffic class object
+    
+        logging.info(
+            "No forwarder mapping yet for object type=%s, changed_leafs=%s",
+            object_type,
+            changed_leafs
+        )                                                                                           # log unsupported object type
+    
+        return []                                                                                   # no Forwarder operation for unsupported object
 
     def _build_operations_from_parent_xml(self, parent_xml, changed_leafs, delete=False):
         if parent_xml is None:
@@ -1540,7 +1623,19 @@ class Agent:
                             "parent_dict": parent_dict })
 
                     if object_type == "wan-link":
-                        nat_detection_candidates.append(parent_dict)                          # run NAT discovery for newly added WAN
+                        nat_detection_candidates.append(parent_dict)                                # direct WAN-link was added
+                    
+                    elif object_type == "underlay":
+                        for wan_link in self._as_list(parent_dict.get("wan-link")):                 # get WAN links nested under underlay
+                            if isinstance(wan_link, dict):
+                                nat_detection_candidates.append(wan_link)                            # schedule NAT discovery for each WAN
+                    
+                    elif object_type == "interfaces":
+                        underlay = parent_dict.get("underlay") or {}                                 # get nested underlay container
+                    
+                        for wan_link in self._as_list(underlay.get("wan-link")):                     # get WAN links nested under interfaces
+                            if isinstance(wan_link, dict):
+                                nat_detection_candidates.append(wan_link)                             # schedule NAT discovery for each WAN
                             
         deleted = root.find("deleted")                                                      # contains deleted datastore objects (normally delete=False, but when clixon reports delete->delete=True)
         
