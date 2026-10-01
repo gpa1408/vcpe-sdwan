@@ -90,10 +90,11 @@ class ForwarderService:
         self._configured_wan_link_map = self._load_wan_link_map()
         if self._configured_wan_link_map:
             def merge_wan_map(state: ForwarderState) -> None:
+                # WAN_LINK_MAP_JSON is only a logical-to-physical resolver.
+                # It must not create/activate WAN interfaces by itself; the Agent
+                # decides which WANs are configured from the YANG datastore.
                 state.wan_link_map.update(self._configured_wan_link_map)
-                for interface_name in self._configured_wan_link_map.values():
-                    interface = self._get_or_create_interface(state, interface_name, role="wan")
-                    state.interfaces[interface_name] = interface.model_copy(update={"role": "wan"})
+
             self.store.mutate_state(merge_wan_map)
 
     def _load_wan_link_map(self) -> dict[str, str]:
@@ -933,30 +934,80 @@ class ForwarderService:
         if interface and interface.master_bridge == bridge_id:
             state.interfaces[interface_name] = interface.model_copy(update={"master_bridge": None})
 
+    @staticmethod
+    def _merge_interface_operational(configured: Interface, live: Interface) -> Interface:
+        """Combine Forwarder configuration with the current Linux runtime state.
+
+        The Forwarder keeps configuration-owned fields such as role and address_mode,
+        while operational fields are refreshed from Linux for every GET.  In
+        particular, a DHCP WAN may be stored with addresses=[] while Linux has
+        already received its lease; GET must expose that live address to the Agent.
+        """
+        return configured.model_copy(
+            update={
+                "admin_state": live.admin_state,
+                "oper_state": live.oper_state,
+                "mtu": live.mtu,
+                "master_bridge": live.master_bridge,
+                "addresses": list(live.addresses),
+            }
+        )
+
     def _collect_interfaces(self, state: ForwarderState) -> list[Interface]:
-        interfaces = {name: interface.model_copy(deep=True) for name, interface in state.interfaces.items()}
-        for interface in self.inspector.list_interfaces():
-            interfaces.setdefault(interface.name, interface)
+        # Read Linux only once so the bulk GET is both current and efficient.
+        live_by_name = {interface.name: interface for interface in self.inspector.list_interfaces()}
+        interfaces: dict[str, Interface] = {}
+
+        # Managed interfaces keep their Forwarder configuration fields but receive
+        # fresh operational fields from the kernel.
+        for name, configured in state.interfaces.items():
+            live = live_by_name.pop(name, None)
+            if live is not None:
+                interfaces[name] = self._merge_interface_operational(configured, live)
+            else:
+                interfaces[name] = configured.model_copy(deep=True)
+
+        # Interfaces that exist only in Linux are still visible in the list, as before.
+        interfaces.update(live_by_name)
         return [interfaces[name] for name in sorted(interfaces)]
 
     def _get_interface_view(self, state: ForwarderState, interface_name: str) -> Interface | None:
-        interface = state.interfaces.get(interface_name)
-        if interface is not None:
-            return interface
+        configured = state.interfaces.get(interface_name)
+        live = self.inspector.get_interface(interface_name)
+
+        if configured is not None:
+            if live is not None:
+                return self._merge_interface_operational(configured, live)
+            return configured.model_copy(deep=True)
+
         if interface_name in state.bridges:
             bridge = state.bridges[interface_name]
-            return Interface(name=interface_name, kind="bridge", role="lan", admin_state=bridge.admin_state)
+            configured_bridge = Interface(
+                name=interface_name,
+                kind="bridge",
+                role="lan",
+                admin_state=bridge.admin_state,
+            )
+            if live is not None:
+                return self._merge_interface_operational(configured_bridge, live)
+            return configured_bridge
+
         if interface_name in state.tunnels:
             tunnel = state.tunnels[interface_name]
-            return Interface(
+            configured_tunnel = Interface(
                 name=interface_name,
                 kind="wireguard",
                 role="tunnel",
                 admin_state="up",
                 addresses=tunnel.local_addresses,
+                address_mode="static",
                 mtu=tunnel.mtu,
             )
-        return self.inspector.get_interface(interface_name)
+            if live is not None:
+                return self._merge_interface_operational(configured_tunnel, live)
+            return configured_tunnel
+
+        return live
 
     def _get_or_create_interface(
         self,
@@ -966,13 +1017,44 @@ class ForwarderService:
         kind: str | None = None,
         role: str | None = None,
     ) -> Interface:
-        interface = self._get_interface_view(state, interface_name)
+        # Mutation paths must start from stored configuration, not from the merged
+        # operational GET view.  Otherwise a DHCP lease learned from Linux could be
+        # accidentally persisted as desired configuration.
+        interface = state.interfaces.get(interface_name)
+
+        if interface is None and interface_name in state.bridges:
+            bridge = state.bridges[interface_name]
+            interface = Interface(
+                name=interface_name,
+                kind="bridge",
+                role="lan",
+                admin_state=bridge.admin_state,
+            )
+
+        if interface is None and interface_name in state.tunnels:
+            tunnel = state.tunnels[interface_name]
+            interface = Interface(
+                name=interface_name,
+                kind="wireguard",
+                role="tunnel",
+                admin_state="up",
+                addresses=tunnel.local_addresses,
+                address_mode="static",
+                mtu=tunnel.mtu,
+            )
+
+        if interface is None:
+            # Preserve the previous behaviour for a physical interface that exists
+            # in Linux but has not yet been managed by the Forwarder.
+            interface = self.inspector.get_interface(interface_name)
+
         if interface is None:
             interface = Interface(
                 name=interface_name,
                 kind=self._default_interface_kind(interface_name),
                 role=role or "unknown",
             )
+
         updates: dict[str, Any] = {"name": interface_name}
         if kind is not None:
             updates["kind"] = kind
