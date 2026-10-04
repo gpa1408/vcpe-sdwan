@@ -644,6 +644,44 @@ class ForwarderService:
         if method == "POST" and re.fullmatch(r"/api/v1/interfaces/[^/]+/nat-discovery", path):
             raise ForwarderError(400, "NAT discovery operations are not supported inside transactions")
 
+        # Complete removal of Forwarder-owned configuration for a physical interface.
+        # This is intentionally different from PUT .../addresses {"addresses": []},
+        # which means DHCP mode for a configured WAN.  The physical Linux NIC is
+        # retained; removing it from state.interfaces makes the renderer clean the
+        # Forwarder-owned DHCP/address/routing state during the transition.
+        match = re.fullmatch(r"/api/v1/interfaces/([^/]+)/configuration", path)
+        if method == "DELETE" and match:
+            interface_name = match.group(1)
+
+            if interface_name in state.bridges:
+                raise ForwarderError(409, f"interface {interface_name} is a bridge; delete the bridge endpoint instead")
+            if interface_name in state.tunnels:
+                raise ForwarderError(409, f"interface {interface_name} is a tunnel; delete the tunnel endpoint instead")
+
+            # Idempotent by design: Agent/YANG reconciliation may delete an already
+            # absent WAN configuration.  The actual Linux device is not deleted.
+            state.interfaces.pop(interface_name, None)
+
+            # Static routes that explicitly use the removed interface are no longer
+            # valid Forwarder desired state and must not be re-rendered later.
+            for route_set_id, route_set in list(state.static_route_sets.items()):
+                if any(route.out_interface == interface_name for route in route_set.routes):
+                    state.static_route_sets.pop(route_set_id, None)
+
+            # Keep deployment mappings coming from WAN_LINK_MAP_JSON. They are only
+            # passive UPLx -> NIC resolution metadata. Remove only mappings learned
+            # dynamically from previous static-route configuration.
+            configured_logicals = {
+                logical
+                for logical, mapped in self._configured_wan_link_map.items()
+                if mapped == interface_name
+            }
+            for logical, mapped in list(state.wan_link_map.items()):
+                if mapped == interface_name and logical not in configured_logicals:
+                    state.wan_link_map.pop(logical, None)
+
+            return OperationOutcome(204, "configuration deleted")
+
         match = re.fullmatch(r"/api/v1/interfaces/([^/]+)/state", path)
         if method == "PUT" and match:
             interface_name = match.group(1)

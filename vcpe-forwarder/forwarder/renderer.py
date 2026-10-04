@@ -118,6 +118,37 @@ class Renderer:
     def _render_cleanup(self, previous: ForwarderState, current: ForwarderState) -> list[str]:
         commands: list[str] = []
 
+        # A physical interface removed from Forwarder desired state must lose only
+        # Forwarder-owned configuration.  Keep the physical NIC itself, but stop its
+        # DHCP client, run the DHCP deconfig hook (address/source-rule/table/default
+        # cleanup), flush non-DHCP managed addresses when applicable, and leave it
+        # administratively down.
+        removed_interfaces = set(previous.interfaces) - set(current.interfaces)
+        for name in sorted(removed_interfaces):
+            old = previous.interfaces[name]
+            if old.kind in {"bridge", "wireguard"}:
+                continue
+
+            pid_path = f"/run/forwarder/udhcpc-{name}.pid"
+            commands.append(
+                f"if [ -f {pid_path} ]; then "
+                f"kill $(cat {pid_path}) >/dev/null 2>&1 || true; "
+                f"rm -f {pid_path}; fi"
+            )
+
+            if old.role == "wan" or old.address_mode == "dhcp":
+                commands.append(
+                    f"interface={name} /usr/local/sbin/forwarder-udhcpc-script "
+                    f"deconfig >/dev/null 2>&1 || true"
+                )
+
+            # DHCP deconfig removes the IPv4 lease. Static/manual interfaces also
+            # need their configured addresses removed explicitly (including IPv6).
+            if old.address_mode != "dhcp":
+                commands.append(f"ip address flush dev {name} || true")
+
+            commands.append(f"ip link set dev {name} down || true")
+
         for bridge_id in sorted(set(previous.bridges) - set(current.bridges)):
             for member in previous.bridges[bridge_id].members:
                 commands.append(f"ip link set dev {member} nomaster || true")
@@ -415,7 +446,14 @@ class Renderer:
 
     def _resolve_wan_interface(self, logical_name: str, state: ForwarderState) -> str | None:
         if logical_name in state.wan_link_map:
-            return state.wan_link_map[logical_name]
+            mapped = state.wan_link_map[logical_name]
+            configured = state.interfaces.get(mapped)
+            # WAN_LINK_MAP_JSON is passive metadata, not proof that this WAN is
+            # configured.  A deleted/stale WAN must therefore not become routable
+            # merely because its UPLx -> NIC mapping still exists.
+            if configured is not None and configured.role == "wan":
+                return mapped
+            return None
         # Static WAN routes created by the Agent use <WAN>-default and expose out_interface.
         route_set = state.static_route_sets.get(f"{logical_name}-default")
         if route_set:
@@ -438,8 +476,13 @@ class Renderer:
         """
         interface = state.interfaces.get(dev)
         if interface is None:
-            # The device may be external/unmanaged by the Forwarder. Do not reject it
-            # solely because it is absent from state.interfaces.
+            # A physical NIC that appears in WAN_LINK_MAP_JSON but is absent from
+            # state.interfaces is only passive deployment metadata: it is not an
+            # active/configured WAN and must not be used by stale routing objects.
+            if dev in state.wan_link_map.values():
+                return False
+            # Other external/unmanaged devices may still be used by explicit path
+            # objects; preserve the previous behavior for those devices.
             return True
         return interface.admin_state != "down"
 
@@ -487,6 +530,11 @@ class Renderer:
 
         dev = self._device_for_selected_path(selected_path, state, selected_path_type)
         if not dev:
+            if selected_path_type == "wan-link" and selected_path in state.wan_link_map:
+                # The logical mapping still exists as deployment metadata, but the
+                # mapped WAN is not currently configured.  Keep marked traffic from
+                # falling through to main while allowing the WAN deletion to apply.
+                return [self._unreachable_default_command(route_table)]
             return [f"echo 'unresolved selected path: {selected_path}' >&2; exit 42"]
 
         if not self._interface_is_usable_for_routing(dev, state):

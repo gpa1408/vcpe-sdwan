@@ -117,6 +117,12 @@ def create_app(
             request.model_dump(mode="json"),
         )
 
+    @app.delete("/api/v1/interfaces/{interface_name}/configuration", status_code=204)
+    def delete_interface_configuration(interface_name: str) -> Response:
+        # Remove Forwarder ownership/configuration while retaining the physical NIC.
+        service_delete(f"/api/v1/interfaces/{interface_name}/configuration")
+        return Response(status_code=204)
+
     @app.get("/api/v1/interfaces/{interface_name}/counters")
     def get_interface_counters(interface_name: str):
         return service_get(f"/api/v1/interfaces/{interface_name}/counters")
