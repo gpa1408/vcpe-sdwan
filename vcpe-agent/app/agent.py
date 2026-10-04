@@ -1062,8 +1062,7 @@ class Agent:
         operations = []                                                                   #stores the forwarder operations generated for this object
 
         if delete:
-            operations.append(self._operation("PUT", f"/api/v1/interfaces/{interface_name}/state", {"state": "down"}))
-            operations.append(self._operation("DELETE", f"/api/v1/routes/static/{route_set_id}"))
+            operations.append(self._operation("DELETE", f"/api/v1/interfaces/{interface_name}/configuration") )     # Complete removal of Forwarder managed WAN configuration.
             return operations
 
         if self._has_change(changed_leafs, "admin-enabled") and admin_enabled is not None:
