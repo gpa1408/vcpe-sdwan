@@ -10,6 +10,7 @@ import socket
 import struct
 import subprocess
 import threading
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path as FilesystemPath
@@ -275,12 +276,21 @@ class ForwarderService:
         self.store.write_task_record(updated)
 
     def _discover_nat(self, interface_name: str, stun_servers: list[str]) -> NatDiscoveryObserved:
-        """Run an RFC5389 Binding Request explicitly bound to the requested WAN.
+        """Discover the WAN mapped address using at least two STUN servers.
 
-        A single binding request reliably discovers the mapped address, but it is not
-        sufficient to distinguish full-cone/restricted/symmetric NAT. We therefore
-        report `none` only when public and local IPv4 are equal; otherwise `unknown`.
-        This matches the YANG enum without inventing a NAT classification.
+        Two independent STUN Binding Requests are sent through the *same* UDP
+        socket, so the local source IP/port stays identical. This lets us compare
+        whether the NAT mapping changes when the remote STUN destination changes.
+
+        Classification intentionally stays conservative:
+          - ``none``: both servers see the local WAN IPv4 unchanged.
+          - ``symmetric``: both servers confirm NAT and return different mapped
+            public IP/port tuples for the same local UDP socket.
+          - ``unknown``: NAT is present but both servers return the same mapping.
+
+        Two Binding Requests are still not enough to distinguish full-cone,
+        restricted-cone and port-restricted-cone NAT, because those require
+        filtering-behaviour tests in addition to mapping comparison.
         """
         interface = self.inspector.get_interface(interface_name)
         if interface is None:
@@ -294,31 +304,125 @@ class ForwarderService:
         if not local_ip:
             raise RuntimeError(f"interface {interface_name} has no IPv4 address")
 
-        servers = stun_servers or ["stun.l.google.com:19302"]
-        host, port = self._split_host_port(servers[0])
+        # Pamodi requested validation against two STUN servers. Honour servers
+        # supplied by the Agent first and supplement them with two public defaults
+        # when fewer than two distinct servers are provided.
+        defaults = [
+            "stun.l.google.com:19302",
+            "stun.cloudflare.com:3478",
+        ]
+        candidates: list[str] = []
+        for server in [*(stun_servers or []), *defaults]:
+            server = str(server).strip()
+            if server and server not in candidates:
+                candidates.append(server)
+
+        magic_cookie = 0x2112A442
+        observations: list[tuple[str, str, int]] = []
+        errors: list[str] = []
+        used_destinations: set[tuple[str, int]] = set()
+
+        # IMPORTANT: reuse one socket for both servers. If a different local
+        # source port were used for each request, a changed public port would not
+        # prove destination-dependent/symmetric mapping.
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
+            if hasattr(socket, "SO_BINDTODEVICE"):
+                sock.setsockopt(
+                    socket.SOL_SOCKET,
+                    socket.SO_BINDTODEVICE,
+                    interface_name.encode() + b"\0",
+                )
+            sock.bind((local_ip, 0))
+
+            for server in candidates:
+                if len(observations) >= 2:
+                    break
+                try:
+                    server_addr, public_ip, public_port = self._stun_binding_request(
+                        sock, server, magic_cookie
+                    )
+                    destination = (server_addr[0], server_addr[1])
+                    if destination in used_destinations:
+                        errors.append(f"{server}: resolves to an already-tested STUN destination")
+                        continue
+                    used_destinations.add(destination)
+                    observations.append((server, public_ip, public_port))
+                except Exception as exc:
+                    errors.append(f"{server}: {exc}")
+
+        if len(observations) < 2:
+            detail = "; ".join(errors) if errors else "no STUN responses received"
+            raise RuntimeError(
+                "NAT discovery requires successful responses from two distinct STUN servers; "
+                f"got {len(observations)}. {detail}"
+            )
+
+        first_server, public_ip, public_port = observations[0]
+        second_server, public_ip_2, public_port_2 = observations[1]
+
+        first_is_public = public_ip == local_ip
+        second_is_public = public_ip_2 == local_ip
+
+        if first_is_public and second_is_public:
+            nat_type = "none"
+        elif not first_is_public and not second_is_public and (public_ip, public_port) != (public_ip_2, public_port_2):
+            # Same local UDP socket, different remote STUN destinations, different
+            # external mapping -> endpoint-dependent mapping (classic symmetric NAT).
+            nat_type = "symmetric"
+        else:
+            # NAT exists, but two ordinary Binding Requests cannot determine the
+            # filtering behaviour needed for full/restricted/port-restricted cone.
+            nat_type = "unknown"
+
+        return NatDiscoveryObserved(
+            public_ip=public_ip,
+            public_port=public_port,
+            nat_type=nat_type,
+        )
+
+    def _stun_binding_request(
+        self,
+        sock: socket.socket,
+        server: str,
+        magic_cookie: int,
+        *,
+        timeout_seconds: float = 5.0,
+    ) -> tuple[tuple[str, int], str, int]:
+        """Send one RFC5389 Binding Request on an already-bound UDP socket."""
+        host, port = self._split_host_port(server)
         infos = socket.getaddrinfo(host, port, socket.AF_INET, socket.SOCK_DGRAM)
         if not infos:
             raise RuntimeError(f"cannot resolve STUN server {host}")
         server_addr = infos[0][4]
 
-        magic_cookie = 0x2112A442
         transaction_id = os.urandom(12)
         request = struct.pack("!HHI12s", 0x0001, 0, magic_cookie, transaction_id)
+        sock.sendto(request, server_addr)
 
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
-            sock.settimeout(8.0)
-            # Force packets to the requested WAN, not the management/default route.
-            if hasattr(socket, "SO_BINDTODEVICE"):
-                sock.setsockopt(socket.SOL_SOCKET, socket.SO_BINDTODEVICE, interface_name.encode() + b"\0")
-            sock.bind((local_ip, 0))
-            sock.sendto(request, server_addr)
-            response, _ = sock.recvfrom(2048)
+        deadline = time.monotonic() + timeout_seconds
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(f"timeout waiting for STUN response from {server}")
+            sock.settimeout(remaining)
+            try:
+                response, _ = sock.recvfrom(2048)
+            except socket.timeout as exc:
+                raise TimeoutError(f"timeout waiting for STUN response from {server}") from exc
 
-        public_ip, public_port = self._parse_stun_binding_response(
-            response, transaction_id, magic_cookie
-        )
-        nat_type = "none" if public_ip == local_ip else "unknown"
-        return NatDiscoveryObserved(public_ip=public_ip, public_port=public_port, nat_type=nat_type)
+            # A delayed packet from a previously tested server can arrive on the
+            # shared socket. Ignore responses whose transaction id does not match
+            # the current request and keep waiting until this server times out.
+            try:
+                public_ip, public_port = self._parse_stun_binding_response(
+                    response, transaction_id, magic_cookie
+                )
+            except RuntimeError as exc:
+                if str(exc) == "invalid STUN binding response":
+                    continue
+                raise
+
+            return server_addr, public_ip, public_port
 
     def _parse_stun_binding_response(
         self, data: bytes, transaction_id: bytes, magic_cookie: int
