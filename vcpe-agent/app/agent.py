@@ -1694,22 +1694,37 @@ class Agent:
             )
     
             try:
-    
                 # ==========================================================
                 # 0. Check Forwarder health FIRST
                 # ==========================================================
-    
                 if not self._wait_for_forwarder_healthy():
-    
                     logging.error(
                         "Startup reconciliation stopped because "
                         "Forwarder is unhealthy"
                     )
-    
+                
                     self._send_cpe_health_to_controller()
-    
                     return
-    
+                
+                # ==========================================================
+                # Wait until Clixon RESTCONF is ready
+                # ==========================================================
+                
+                if not self.wait_for_restconf(timeout_sec=60):
+                    logging.error(
+                        "Startup reconciliation stopped because "
+                        "RESTCONF is not ready"
+                    )
+                    return
+                
+                
+                # ==========================================================
+                # 1. Read persistent YANG configuration
+                # ==========================================================
+                
+                current_config = \
+                    self.config_reader.get_intended_config()
+                    
                 # ==========================================================
                 # 1. Read persistent YANG configuration
                 # ==========================================================
