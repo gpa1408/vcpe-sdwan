@@ -232,7 +232,7 @@ class Agent:
             }
 
     def _update_cpe_state(self):
-        now_ts = time.strftime(%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        now_ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     
         forwarder_status = "down"
         forwarder_version = None
@@ -289,7 +289,7 @@ class Agent:
                 logging.info("Forwarder health check passed")
                 return True
     
-            logging.warning(Forwarder not healthy yet; retrying in %s seconds", interval_sec)
+            logging.warning("Forwarder not healthy yet; retrying in %s seconds", interval_sec)
     
             time.sleep(interval_sec)
     
@@ -414,8 +414,8 @@ class Agent:
         except Exception as e:
             logging.warning("CPE registration with controller failed: %s", e)
             return False
-
-     def _send_cpe_health_to_controller(self):
+            
+    def _send_cpe_health_to_controller(self):
         try:
             current_config = self.config_reader.get_intended_config()
             system = current_config.get("system", {})
@@ -1853,9 +1853,45 @@ class Agent:
                         validate_only=False,
                         timeout=60
                     )
+
+                # =================================================================
+                # PHASE 4 - Restore firewall rules
+                # =================================================================
+                firewall_operations = []
+                
+                firewall_rules = self._as_list(
+                    current_config.get("firewall", {}).get("rule", [])
+                )
+                
+                for firewall_rule in firewall_rules:
+                
+                    if not isinstance(firewall_rule, dict):
+                        continue
+                
+                    firewall_operations.extend(
+                        self._build_firewall_rule_operations(
+                            firewall_rule,
+                            ["*"],
+                            delete=False
+                        )
+                    )
+                
+                if firewall_operations:
+                
+                    logging.info(
+                        "Startup reconciliation: restoring %s firewall operations",
+                        len(firewall_operations)
+                    )
+                
+                    self._send_forwarder_transaction(
+                        operations=firewall_operations,
+                        validate_only=False,
+                        timeout=60
+                    )
+
     
                 # =================================================================
-                # PHASE 4 - Restart monitoring derived from YANG configuration
+                # PHASE 5 - Restart monitoring derived from YANG configuration
                 # =================================================================
                 for traffic_class in traffic_classes:
                     if isinstance(traffic_class, dict):
@@ -1872,7 +1908,7 @@ class Agent:
                         )
     
                 # =================================================================
-                # PHASE 5 - Rediscover live WAN state
+                # PHASE 6 - Rediscover live WAN state
                 # =================================================================
                 self.discover_nat_for_all_wans()
     
@@ -2356,9 +2392,28 @@ class Agent:
         current_config = self.config_reader.get_intended_config()                           # read intended config from YANG datastore
         self.current_config_cache = current_config
 
-        self.check_wan_ip_changes()                                                         # detect changed WAN endpoint and notify controller
-        self._update_cpe_state()
+        # ---------------------------------------------------------
+        # Check Forwarder health FIRST
+        # ---------------------------------------------------------
+        forwarder_healthy = self._update_cpe_state()
     
+        # CPE heartbeat to Controller is independent of Forwarder tasks
+        self._send_cpe_health_to_controller()
+    
+        if not forwarder_healthy:
+    
+            logging.warning(
+                "Skipping Forwarder-dependent runtime tasks "
+                "because Forwarder is unhealthy"
+            )
+    
+            return {
+                "status": "degraded",
+                "reason": "forwarder unhealthy"
+            }
+
+        self.check_wan_ip_changes()                                                         # detect changed WAN endpoint and notify controller
+  
         if not hasattr(self, "metric_reader"):
             logging.warning("metric_reader not configured")
             return {"status": "skipped", "reason": "metric_reader not configured"}
