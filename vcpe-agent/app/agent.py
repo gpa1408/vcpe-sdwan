@@ -1061,7 +1061,7 @@ class Agent:
     
             data = response.json()                                                        # parse forwarder JSON response body
     
-            flow_policies = data.get("flow_policies", [])                                 # expected list of stored flow policies
+            flow_policies = data.get("items", data.get("flow_policies", []))              # expected list of stored flow policies
     
             for policy in flow_policies:                                                  # loop through each flow policy returned by forwarder
                 policy_id = (                                                             # accept possible naming variations from forwarder
