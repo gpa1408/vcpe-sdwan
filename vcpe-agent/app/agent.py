@@ -1717,20 +1717,11 @@ class Agent:
                     )
                     return
                 
-                
                 # ==========================================================
                 # 1. Read persistent YANG configuration
                 # ==========================================================
                 
-                current_config = \
-                    self.config_reader.get_intended_config()
-                    
-                # ==========================================================
-                # 1. Read persistent YANG configuration
-                # ==========================================================
-    
-                current_config = \
-                    self.config_reader.get_intended_config()
+                current_config = self.config_reader.get_intended_config()
     
                 self.current_config_cache = current_config
     
