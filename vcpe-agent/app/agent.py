@@ -49,6 +49,10 @@ class Agent:
         self.forwarder_base_url = "http://host.docker.internal:9090"                  # fixed forwarder API URL used by the agent
         self.forwarder_dry_run = False                                                # If forwarder is not ready yet,a dry-run "true" (false send real API calls)
 
+        self.startup_reconciled = False
+        self.startup_reconcile_started = False
+        self.startup_reconcile_lock = threading.Lock()
+        self.startup_reconcile_event = threading.Event()
     # =====================================================================================
     # Basic helpers
     # =====================================================================================
@@ -228,7 +232,7 @@ class Agent:
             }
 
     def _update_cpe_state(self):
-        now_ts = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        now_ts = time.strftime(%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     
         forwarder_status = "down"
         forwarder_version = None
@@ -250,34 +254,56 @@ class Agent:
             status_reason = "CPE agent and forwarder are operational"
     
         except Exception as e:
-            logging.warning("Forwarder health check failed: %s", e)
+            logging.warning(
+                "Forwarder health check failed: %s",
+                e
+            )
     
         if forwarder_status == "healthy":
             oper_status = "up"
-        elif forwarder_status == "down":
-            oper_status = "degraded"
         else:
-            oper_status = "unknown"
+            oper_status = "degraded"
     
         self.latest_cpe_state = {
             "oper-status": oper_status,
             "power-status": "powered-on",
             "forwarder-status": forwarder_status,
             "forwarder-version": forwarder_version,
-            "uptime-seconds": int(time.time() - self.agent_start_time),
+            "uptime-seconds": int(
+                time.time() - self.agent_start_time
+            ),
             "last-seen": now_ts,
             "status-reason": status_reason
         }
+    
+        return forwarder_status == "healthy"
 
+    def _wait_for_forwarder_healthy(self, timeout_sec=60, interval_sec=2):
+    
+        logging.info("Waiting for Forwarder health before startup reconciliation" )
+    
+        start_time = time.time()
+    
+        while time.time() - start_time < timeout_sec:
+            if self._update_cpe_state():
+                logging.info("Forwarder health check passed")
+                return True
+    
+            logging.warning(Forwarder not healthy yet; retrying in %s seconds", interval_sec)
+    
+            time.sleep(interval_sec)
+    
+        logging.error("Forwarder did not become healthy within %s seconds", timeout_sec)
+    
+        return False
+    
     def _wait_for_wan_ready(self, wan, timeout_sec=30):
         wan_name = wan.get("name")
         interface_name = wan.get("interface-name")
         role = wan.get("role")
     
         if not wan_name or not interface_name:
-            logging.warning(
-                "WAN readiness check skipped because WAN name or interface is missing"
-            )
+            logging.warning("WAN readiness check skipped because WAN name or interface is missing")
             return
     
         logging.info(
@@ -387,6 +413,56 @@ class Agent:
     
         except Exception as e:
             logging.warning("CPE registration with controller failed: %s", e)
+            return False
+
+     def _send_cpe_health_to_controller(self):
+        try:
+            current_config = self.config_reader.get_intended_config()
+            system = current_config.get("system", {})
+    
+            cpe_id = system.get("local-cpe-id")
+            controller_ip = system.get("controller-ip")
+            controller_port = system.get("controller-port")
+    
+            if not cpe_id:
+                logging.info(
+                    "Skipping CPE health report because local-cpe-id is not assigned yet"
+                )
+                return False
+    
+            if not controller_ip or not controller_port:
+                logging.warning(
+                    "Cannot send CPE health report because controller address is missing"
+                )
+                return False
+    
+            url = (
+                f"http://{controller_ip}:"
+                f"{controller_port}"
+                f"/healthcheck/{cpe_id}"
+            )
+    
+            response = requests.put(
+                url,
+                json={"reachable": True},
+                timeout=5
+            )
+    
+            response.raise_for_status()
+    
+            logging.info(
+                "CPE reachability reported to controller: cpe-id=%s",
+                cpe_id
+            )
+    
+            return True
+    
+        except Exception as e:
+            logging.warning(
+                "Failed to report CPE reachability to controller: %s",
+                e
+            )
+    
             return False
     # =====================================================================================
     # Publish operations data in Datastore
@@ -871,13 +947,27 @@ class Agent:
 
     def run_steering_loop_after_restconf_ready(self, interval_sec=10):
         if not self.wait_for_restconf():                                                # wait until Clixon RESTCONF is ready
-            return                                                                      # stop startup if RESTCONF is not ready
-
+            return
+    
         self.current_config_cache = self.config_reader.get_intended_config()            # populate cache once at startup
-            
-        self._sync_fwmarks_from_forwarder()                                             # recover existing fwmarks from forwarder after router/agent reboot (only once)
-        self.discover_nat_for_all_wans()                                                # initial NAT discovery for all WANs
-        self._announce_to_controller()                                                  # send one initial CPE registration to controller
+    
+        logging.info("Waiting for startup reconciliation before steering loop")
+    
+        # Normally transaction-id 0 triggers reconciliation.
+        # Timeout prevents the Agent from being permanently blocked
+        
+        reconciliation_triggered = self.startup_reconcile_event.wait(timeout=10)         
+    
+        if not reconciliation_triggered:
+            logging.warning( "No Clixon transaction 0 reconciliation received; "        # if Clixon does not deliver transaction 0 for some reason.
+                "running startup reconciliation as fallback"
+            )
+    
+            self.startup_reconcile_started = True
+            self.reconcile_startup_state()
+    
+        logging.info( "Startup recovery finished; starting runtime steering loop")
+    
         self.run_forever(interval_sec=interval_sec)
         
     # =====================================================================================
@@ -1012,7 +1102,7 @@ class Agent:
         except Exception as e:                                                            # catch connection, timeout, JSON, or other errors
             logging.exception("Failed to sync fwmarks from forwarder: %s", e)             # do not stop agent if startup recovery fails
     
-    def _send_forwarder_transaction(self, operations, validate_only):
+    def _send_forwarder_transaction(self, operations, validate_only, timeout=10):
         payload = {
             "validate_only": validate_only,                                              # "True" during Clixon validate phase, "False" during commit phase. Detection happens in happens in handle_clixon_transaction()
             "operations": operations}                                                    # all forwarder operations are sent as one transaction
@@ -1027,7 +1117,7 @@ class Agent:
                 "payload": payload}
 
         url = f"{self.forwarder_base_url}/api/v1/transactions"
-        response = requests.post(url, json=payload, timeout=10)                            #send the transaction to the forwarder API
+        response = requests.post(url, json=payload, timeout=timeout)                            #send the transaction to the forwarder API
         response.raise_for_status()
 
         logging.info("Forwarder response body: %s", response.text)                         # log actual response body for debugging
@@ -1589,8 +1679,222 @@ class Agent:
                 parent_dict,
                 e
             )
-
+    # =====================================================================================
+    # Rebuild runtime dataplane state from the persistent YANG datastore (Used after Clixon startup transaction-id 0.YANG datastore is the desired-state source of truth.)
+    # =====================================================================================
+    def reconcile_startup_state(self): 
+        with self.startup_reconcile_lock:
     
+            if self.startup_reconciled:
+                self.startup_reconcile_event.set()
+                return
+    
+            logging.info(
+                "Starting startup reconciliation from YANG datastore"
+            )
+    
+            try:
+    
+                # ==========================================================
+                # 0. Check Forwarder health FIRST
+                # ==========================================================
+    
+                if not self._wait_for_forwarder_healthy():
+    
+                    logging.error(
+                        "Startup reconciliation stopped because "
+                        "Forwarder is unhealthy"
+                    )
+    
+                    self._send_cpe_health_to_controller()
+    
+                    return
+    
+                # ==========================================================
+                # 1. Read persistent YANG configuration
+                # ==========================================================
+    
+                current_config = \
+                    self.config_reader.get_intended_config()
+    
+                self.current_config_cache = current_config
+    
+                # Runtime caches must be rebuilt from the new live dataplane.
+                self.wan_last_ipv4.clear()
+                self.wan_nat_types.clear()
+                self.flow_id_fwmarks.clear()
+    
+                # =================================================================
+                # PHASE 1 - Restore physical interface / LAN configuration
+                # =================================================================
+                interface_operations = []
+    
+                interfaces = current_config.get("interfaces", {})
+    
+                # -------------------------
+                # Restore WAN links
+                # -------------------------
+                underlay = interfaces.get("underlay", {})
+    
+                wan_links = self._as_list(
+                    underlay.get("wan-link", [])
+                )
+    
+                for wan in wan_links:
+                    if not isinstance(wan, dict):
+                        continue
+    
+                    interface_operations.extend(
+                        self._build_wan_link_operations(
+                            wan,
+                            ["*"],
+                            delete=False
+                        )
+                    )
+    
+                # -------------------------
+                # Restore LAN links
+                # -------------------------
+                lan = interfaces.get("lan", {})
+    
+                lan_links = self._as_list(
+                    lan.get("lan-link", [])
+                )
+    
+                for lan_link in lan_links:
+                    if not isinstance(lan_link, dict):
+                        continue
+    
+                    interface_operations.extend(
+                        self._build_lan_link_operations(
+                            lan_link,
+                            ["*"],
+                            delete=False
+                        )
+                    )
+    
+                if interface_operations:
+                    logging.info( "Startup reconciliation: restoring %s WAN/LAN operations",
+                        len(interface_operations)
+                    )
+    
+                    self._send_forwarder_transaction(
+                        operations=interface_operations,
+                        validate_only=False,
+                        timeout=60
+                    )
+    
+                # =================================================================
+                # PHASE 2 - Restore traffic classification / fwmarks
+                # =================================================================
+                traffic_operations = []
+    
+                traffic_classes = self._as_list(
+                    current_config.get("traffic", {}).get("class", [])
+                )
+    
+                for traffic_class in traffic_classes:
+                    if not isinstance(traffic_class, dict):
+                        continue
+    
+                    traffic_operations.extend(
+                        self._build_traffic_class_operations(
+                            traffic_class,
+                            ["*"],
+                            delete=False
+                        )
+                    )
+    
+                if traffic_operations:
+                    logging.info(
+                        "Startup reconciliation: restoring %s traffic-class operations",
+                        len(traffic_operations)
+                    )
+    
+                    self._send_forwarder_transaction(
+                        operations=traffic_operations,
+                        validate_only=False,
+                        timeout=60
+                    )
+    
+                # The Forwarder transaction result should already return fwmarks.
+                # This GET is an additional recovery/synchronization check.
+                self._sync_fwmarks_from_forwarder()
+    
+                # =================================================================
+                # PHASE 3 - Restore WireGuard tunnels + peers
+                # =================================================================
+                tunnel_operations = []
+    
+                tunnels = self._as_list(
+                    current_config.get("overlay", {}).get("tunnel", [])
+                )
+    
+                for tunnel in tunnels:
+                    if not isinstance(tunnel, dict):
+                        continue
+    
+                    tunnel_operations.extend(
+                        self._build_tunnel_operations(
+                            tunnel,
+                            ["*"],
+                            delete=False
+                        )
+                    )
+    
+                if tunnel_operations:
+                    logging.info(
+                        "Startup reconciliation: restoring %s WireGuard operations",
+                        len(tunnel_operations)
+                    )
+    
+                    self._send_forwarder_transaction(
+                        operations=tunnel_operations,
+                        validate_only=False,
+                        timeout=60
+                    )
+    
+                # =================================================================
+                # PHASE 4 - Restart monitoring derived from YANG configuration
+                # =================================================================
+                for traffic_class in traffic_classes:
+                    if isinstance(traffic_class, dict):
+                        self._start_monitoring_for_object(
+                            "class",
+                            traffic_class
+                        )
+    
+                for tunnel in tunnels:
+                    if isinstance(tunnel, dict):
+                        self._start_monitoring_for_object(
+                            "tunnel",
+                            tunnel
+                        )
+    
+                # =================================================================
+                # PHASE 5 - Rediscover live WAN state
+                # =================================================================
+                self.discover_nat_for_all_wans()
+    
+                # Announce only once after the basic dataplane has been rebuilt.
+                self._announce_to_controller()
+    
+                self.startup_reconciled = True
+    
+                logging.info(
+                    "Startup reconciliation completed successfully"
+                )
+    
+            except Exception as e:
+                logging.exception(
+                    "Startup reconciliation failed: %s",
+                    e
+                )
+    
+            finally:
+                # Do not leave the normal runtime loop blocked forever.
+                self.startup_reconcile_event.set()
+                
     # =====================================================================================
     # Clixon callback handling
     # =====================================================================================
@@ -1601,13 +1905,33 @@ class Agent:
         transaction_id = root.findtext("transaction-id")
         validate_only = phase == "validate"                                                       #Clixon sends validate first and commit after successful validation. If Clixon sends phase = "validate"→ validate_only = True
 
-        if transaction_id == "0":                                                                 #transaction 0 is startup data, not a real user config change
-            logging.info("Ignoring Clixon startup transaction 0")
-            return {
-                "status": "ok",
-                "phase": phase,
-                "ignored": True,
-                "reason": "startup transaction"}
+        if transaction_id == "0":
+        
+            logging.info("Received Clixon startup transaction 0 phase=%s", phase)
+        
+            if phase == "validate":                                                              # Validation must never modify the dataplane.
+                return {
+                    "status": "ok",
+                    "phase": phase,
+                    "startup": True,
+                    "message": "Startup reconciliation will run after commit"
+                }
+        
+            if phase == "commit":
+                if not self.startup_reconcile_started:
+                    self.startup_reconcile_started = True
+                    threading.Thread(target=self.reconcile_startup_state,  daemon=True ).start()
+        
+                return {
+                    "status": "ok",
+                    "phase": phase,
+                    "startup": True,
+                    "message": "Startup reconciliation triggered"
+                }
+        
+            raise ValueError(
+                f"Unsupported Clixon startup phase: {phase}"
+            )
 
         if phase not in ["validate", "commit"]:
             raise ValueError(f"Unsupported Clixon phase: {phase}")
