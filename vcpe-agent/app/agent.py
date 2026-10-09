@@ -1435,6 +1435,8 @@ class Agent:
         match = {}                                                                         #traffic match fields such as prefixes, ports and protocol
         self._add_if_not_none(match, "src_prefix", parent_dict.get("src-prefix"))
         self._add_if_not_none(match, "dst_prefix", parent_dict.get("dst-prefix"))
+        self._add_if_not_none(match, "in_interface", parent_dict.get("in-interface"))
+        self._add_if_not_none(match, "out_interface",parent_dict.get("out-interface"))
 
         protocol = parent_dict.get("l4-protocol")
         if protocol:
