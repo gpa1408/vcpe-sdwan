@@ -20,16 +20,6 @@
      policy based steering, firewall configuration, forwarder facing path objects, path groups, NAT services, static routing, and
      operational state reporting.";
 
-  revision 2026-05-12 {
-    description
-      "Revised  model aligned with SD-WAN Forwarder API.";
-  }
-
-  revision 2026-03-13 {
-    description
-      "revision4n";
-  }
-
   /*
    * ======================================================================================================
    * Typedefs
@@ -746,6 +736,18 @@
           type port-number-or-any;
           description
             "One or more destination ports to match, or any";
+        }
+
+        leaf in-interface {
+          type string;
+          description
+            "Ingress interface to match for this firewall rule.";
+        }
+        
+        leaf out-interface {
+          type string;
+          description
+            "Egress interface to match for this firewall rule.";
         }
 
         leaf log {
