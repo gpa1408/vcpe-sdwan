@@ -1263,7 +1263,8 @@ class Agent:
             return []
     
         if delete:
-            return [self._operation("DELETE", f"/api/v1/tunnels/wireguard/{tunnel_id}")]
+            return [self._operation("DELETE", f"/api/v1/tunnels/wireguard/{tunnel_id}"),
+                    self._operation("DELETE", f"/api/v1/tunnels/wireguard/{tunnel_id}" )]
     
         if tunnel_id not in self.generated_tunnel_keys:
             private_key, public_key, private_path = self._generate_wireguard_tunnel_keys(tunnel_id)
@@ -1303,7 +1304,21 @@ class Agent:
             peer_operation = self._build_wireguard_peer_operation(parent_dict)
             if peer_operation:
                 operations.append(peer_operation)
-    
+
+            resolved_peer = parent_dict.get("resolved-peer", {})
+            allowed_prefixes = self._as_list(
+                resolved_peer.get("allowed-prefix"))
+        
+            if allowed_prefixes:
+                route_payload = { "routes": [] }
+        
+                for prefix in allowed_prefixes:
+                    route_payload["routes"].append({
+                        "destination_cidr": prefix,
+                        "out_interface": tunnel_id   })
+        
+                operations.append(
+                    self._operation( "PUT",  f"/api/v1/routes/static/{tunnel_id}-peer-routes", route_payload ))     #Install remote prefixes through this WireGuard tunnel
         return operations
 
     def _build_wireguard_peer_operation(self, tunnel):
