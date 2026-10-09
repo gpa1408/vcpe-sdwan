@@ -423,6 +423,8 @@
         }
 
         container resolved-peer {
+          presence "Indicates that the remote WireGuard peer has been resolved by the controller";
+
           leaf peer-address {
             type inet:ipv4-address;
             mandatory true;
