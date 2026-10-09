@@ -1278,6 +1278,7 @@ class Agent:
     
         admin_enabled = self._bool_value(parent_dict.get("admin-enabled"))
         if self._has_change(changed_leafs, "admin-enabled") and admin_enabled is False:
+            operations.append(self._operation("DELETE", f"/api/v1/routes/static/{tunnel_id}-peer-routes"))
             operations.append(self._operation("DELETE", f"/api/v1/tunnels/wireguard/{tunnel_id}"))
             return operations
     
@@ -1306,9 +1307,14 @@ class Agent:
                 operations.append(peer_operation)
 
             resolved_peer = parent_dict.get("resolved-peer", {})
-            allowed_prefixes = self._as_list(
-                resolved_peer.get("allowed-prefix"))
-        
+            allowed_prefixes = []
+
+            for prefix in self._as_list(resolved_peer.get("allowed-prefix")):
+                try:
+                    allowed_prefixes.append(str(ipaddress.ip_network(prefix, strict=False)))
+                except ValueError:
+                    logging.warning("Ignoring invalid WireGuard allowed-prefix: %s", prefix)
+    
             if allowed_prefixes:
                 route_payload = { "routes": [] }
         
@@ -1331,7 +1337,12 @@ class Agent:
         peer_address = resolved_peer.get("peer-address")
         peer_port = resolved_peer.get("peer-port")
         peer_public_key = resolved_peer.get("peer-public-key")
-        allowed_prefixes = self._as_list(resolved_peer.get("allowed-prefix"))
+        allowed_prefixes = []
+        for prefix in self._as_list(resolved_peer.get("allowed-prefix")):
+            try:
+                allowed_prefixes.append(str(ipaddress.ip_network(prefix, strict=False)))
+            except ValueError:
+                logging.warning("Ignoring invalid WireGuard allowed-prefix: %s", prefix )
         keepalive = tunnel.get("keepalive-seconds")
 
         peer_payload = {}
