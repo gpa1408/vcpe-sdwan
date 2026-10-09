@@ -1263,7 +1263,7 @@ class Agent:
             return []
     
         if delete:
-            return [self._operation("DELETE", f"/api/v1/tunnels/wireguard/{tunnel_id}"),
+            return [self._operation("DELETE",  f"/api/v1/routes/static/{tunnel_id}-peer-routes"),
                     self._operation("DELETE", f"/api/v1/tunnels/wireguard/{tunnel_id}" )]
     
         if tunnel_id not in self.generated_tunnel_keys:
