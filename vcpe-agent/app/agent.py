@@ -2123,39 +2123,34 @@ class Agent:
                 data = node.find("data")                                                # contains the actual object added by Clixon
                 added_xml = self._first_child(data)                                     # extract actual added object
             
-        if added_xml is not None:
-            object_type = self._local_name(added_xml.tag)
-        
-            if object_type == "resolved-peer":
-        
-                parent_data = node.find("parent-data")
-                tunnel_xml = self._first_child(parent_data)
-        
-                if (
-                    tunnel_xml is not None
-                    and self._local_name(tunnel_xml.tag) == "tunnel"
-                ):
-                    tunnel_dict = self._xml_to_dict(tunnel_xml)
-        
-                    operations.extend(
-                        self._build_tunnel_operations(
-                            tunnel_dict,
-                            ["resolved-peer"],
-                            delete=False
-                        )
-                    )
-
-    else:
-        operations.extend(
-            self._build_operations_from_parent_xml(
-                added_xml,
-                ["*"],
-                delete=False
-            )
-        )
-            
                 if added_xml is not None:
                     object_type = self._local_name(added_xml.tag)
+                
+                    if object_type == "resolved-peer":
+                        parent_data = node.find("parent-data")
+                        tunnel_xml = self._first_child(parent_data)
+                
+                        if (tunnel_xml is not None
+                            and self._local_name(tunnel_xml.tag) == "tunnel"
+                        ):
+                            tunnel_dict = self._xml_to_dict(tunnel_xml)
+                
+                            operations.extend(
+                                self._build_tunnel_operations(
+                                    tunnel_dict,
+                                    ["resolved-peer"],
+                                    delete=False
+                                )
+                            )
+
+                    else:
+                        operations.extend(
+                            self._build_operations_from_parent_xml(
+                                added_xml,
+                                ["*"],
+                                delete=False
+                            )
+                        )
                     parent_dict = self._xml_to_dict(added_xml)
 
                     if object_type == "tunnel":
