@@ -2102,151 +2102,126 @@ class Agent:
                         for wan_link in self._as_list(underlay.get("wan-link")):                     # get WAN links nested under interfaces
                             if isinstance(wan_link, dict):
                                 nat_detection_candidates.append(wan_link)                             # schedule NAT discovery for each WAN
-                            
-                deleted = root.find("deleted")
-                
-                if deleted is not None:
-                
-                    tunnel_delete_groups = {}
-                    other_deleted_nodes = []
-                
-                    # ------------------------------------------------------------------
-                    # First pass:
-                    # Group deleted tunnel children by their parent tunnel.
-                    #
-                    # Clixon reports a complete tunnel deletion as deletion of all the
-                    # tunnel's child nodes, while parent-data still contains the complete
-                    # old tunnel configuration.
-                    # ------------------------------------------------------------------
-                    for node in deleted.findall("node"):
-                
-                        data = node.find("data")
-                        deleted_xml = self._first_child(data)
-                
-                        if deleted_xml is None:
-                            continue
-                
-                        parent_data = node.find("parent-data")
-                        parent_xml = self._first_child(parent_data)
-                
-                        # --------------------------------------------------------------
-                        # Deleted node belongs to a tunnel
-                        # --------------------------------------------------------------
-                        if (
-                            parent_xml is not None
-                            and self._local_name(parent_xml.tag) == "tunnel"
-                        ):
-                
-                            tunnel_dict = self._xml_to_dict(parent_xml)
-                            tunnel_id = tunnel_dict.get("name")
-                
-                            if tunnel_id:
-                
-                                if tunnel_id not in tunnel_delete_groups:
-                                    tunnel_delete_groups[tunnel_id] = {
-                                        "parent_dict": tunnel_dict,
-                                        "deleted_leafs": set(),
-                                        "nodes": []
-                                    }
-                
-                                tunnel_delete_groups[tunnel_id]["deleted_leafs"].add(
-                                    self._local_name(deleted_xml.tag)
-                                )
-                
-                                tunnel_delete_groups[tunnel_id]["nodes"].append(node)
-                
-                                continue
-                
-                        # Not a tunnel child deletion
-                        other_deleted_nodes.append(node)
-                
-                    # ------------------------------------------------------------------
-                    # Process grouped tunnel deletions
-                    # ------------------------------------------------------------------
-                    for tunnel_id, item in tunnel_delete_groups.items():
-                
-                        parent_dict = item["parent_dict"]
-                        deleted_leafs = item["deleted_leafs"]
-                
-                        # All top-level children that existed in the old tunnel,
-                        # except the list key "name".
-                        expected_leafs = {
-                            key
-                            for key in parent_dict.keys()
-                            if key != "name"
-                        }
-                
-                        # --------------------------------------------------------------
-                        # If every old tunnel child disappeared in the same transaction,
-                        # this represents deletion of the whole tunnel list entry.
-                        # --------------------------------------------------------------
-                        if expected_leafs and expected_leafs.issubset(deleted_leafs):
-                
-                            logging.info(
-                                "Detected complete tunnel deletion: %s",
-                                tunnel_id
-                            )
-                
-                            operations.extend(
-                                self._build_operations_from_object(
-                                    "tunnel",
-                                    parent_dict,
-                                    ["*"],
-                                    delete=True
-                                )
-                            )
-                
-                            monitoring_stop_candidates.append({
-                                "object_type": "tunnel",
-                                "parent_dict": parent_dict
-                            })
-                
-                        else:
-                            # ----------------------------------------------------------
-                            # Only one or some tunnel children were deleted.
-                            # Do NOT interpret this as deletion of the whole tunnel.
-                            # Preserve normal processing for those individual deletions.
-                            # ----------------------------------------------------------
-                            for node in item["nodes"]:
-                
-                                data = node.find("data")
-                                deleted_xml = self._first_child(data)
-                
-                                operations.extend(
-                                    self._build_operations_from_parent_xml(
-                                        deleted_xml,
-                                        ["*"],
-                                        delete=True
-                                    )
-                                )
-                
-                    # ------------------------------------------------------------------
-                    # Process deletions that are unrelated to tunnels as before
-                    # ------------------------------------------------------------------
-                    for node in other_deleted_nodes:
-                
-                        data = node.find("data")
-                        deleted_xml = self._first_child(data)
-                
+
+
+        deleted = root.find("deleted")                                                               # contains deleted datastore objects
+        
+        if deleted is not None:
+        
+            tunnel_delete_groups = {}                                                                # groups deleted tunnel child nodes by tunnel name
+            other_deleted_nodes = []                                                                 # stores deleted objects that are not tunnel children
+        
+            for node in deleted.findall("node"):
+        
+                data = node.find("data")                                                              # actual deleted child/object
+                deleted_xml = self._first_child(data)                                                 # extract deleted XML object
+        
+                if deleted_xml is None:
+                    continue                                                                          # skip invalid callback entries
+        
+                parent_data = node.find("parent-data")                                                # contains complete old parent object
+                parent_xml = self._first_child(parent_data)                                           # extract old parent object
+        
+                if (
+                    parent_xml is not None
+                    and self._local_name(parent_xml.tag) == "tunnel"
+                ):                                                                                    # Clixon reported a deleted child belonging to a tunnel
+        
+                    tunnel_dict = self._xml_to_dict(parent_xml)                                       # full old tunnel configuration
+                    tunnel_id = tunnel_dict.get("name")                                               # tunnel list key
+        
+                    if tunnel_id:
+        
+                        if tunnel_id not in tunnel_delete_groups:
+                            tunnel_delete_groups[tunnel_id] = {
+                                "parent_dict": tunnel_dict,
+                                "deleted_leafs": set(),
+                                "nodes": []
+                            }                                                                         # create one group per tunnel
+        
+                        tunnel_delete_groups[tunnel_id]["deleted_leafs"].add(
+                            self._local_name(deleted_xml.tag)
+                        )                                                                             # remember which tunnel child was deleted
+        
+                        tunnel_delete_groups[tunnel_id]["nodes"].append(node)                         # keep original node for partial-delete fallback
+        
+                        continue                                                                      # tunnel child already grouped, do not process again
+        
+                other_deleted_nodes.append(node)                                                      # normal deletion unrelated to tunnel grouping
+        
+        
+            for tunnel_id, item in tunnel_delete_groups.items():
+        
+                parent_dict = item["parent_dict"]                                                     # full old tunnel configuration
+                deleted_leafs = item["deleted_leafs"]                                                 # all deleted tunnel children in this transaction
+        
+                expected_leafs = {
+                    key
+                    for key in parent_dict.keys()
+                    if key != "name"
+                }                                                                                     # all old tunnel children except the list key
+        
+                if expected_leafs and expected_leafs.issubset(deleted_leafs):                         # all old tunnel children disappeared together
+        
+                    logging.info(
+                        "Detected complete tunnel deletion: %s",
+                        tunnel_id
+                    )                                                                                 # complete list-entry deletion detected
+        
+                    operations.extend(
+                        self._build_operations_from_object(
+                            "tunnel",
+                            parent_dict,
+                            ["*"],
+                            delete=True
+                        )
+                    )                                                                                 # generate Forwarder DELETE for route and WireGuard tunnel
+        
+                    monitoring_stop_candidates.append({
+                        "object_type": "tunnel",
+                        "parent_dict": parent_dict
+                    })                                                                                # stop tunnel monitoring after successful commit
+        
+                else:
+        
+                    for node in item["nodes"]:
+        
+                        data = node.find("data")                                                      # retrieve individual deleted child
+                        deleted_xml = self._first_child(data)                                         # extract deleted child XML
+        
                         operations.extend(
                             self._build_operations_from_parent_xml(
                                 deleted_xml,
                                 ["*"],
                                 delete=True
                             )
-                        )
-                
-                        if deleted_xml is not None:
-                
-                            object_type = self._local_name(deleted_xml.tag)
-                            parent_dict = self._xml_to_dict(deleted_xml)
-                
-                            if object_type in ["class", "tunnel"]:
-                
-                                monitoring_stop_candidates.append({
-                                    "object_type": object_type,
-                                    "parent_dict": parent_dict
-                                })
+                        )                                                                             # preserve normal processing for partial tunnel-child deletion
+        
+        
+            for node in other_deleted_nodes:
+        
+                data = node.find("data")                                                              # actual deleted object
+                deleted_xml = self._first_child(data)                                                 # extract deleted object XML
+        
+                operations.extend(
+                    self._build_operations_from_parent_xml(
+                        deleted_xml,
+                        ["*"],
+                        delete=True
+                    )
+                )                                                                                     # process non-tunnel deletions normally
+        
+                if deleted_xml is not None:
+        
+                    object_type = self._local_name(deleted_xml.tag)                                   # determine deleted object type
+                    parent_dict = self._xml_to_dict(deleted_xml)                                      # convert deleted object into Python dict
+        
+                    if object_type in ["class", "tunnel"]:
+        
+                        monitoring_stop_candidates.append({
+                            "object_type": object_type,
+                            "parent_dict": parent_dict
+                        })                                                                            # stop monitoring after successful commit
                 
         if not operations:                                                                  #if this config change has no forwarder mapping, return OK without sending anything
             return {
