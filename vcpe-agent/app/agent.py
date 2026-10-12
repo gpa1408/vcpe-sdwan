@@ -188,6 +188,21 @@ class Agent:
         except Exception as e:
             logging.exception("Failed to get or create WireGuard keys for tunnel %s: %s", tunnel_name, e)
             return None, None, None
+
+    def _delete_wireguard_tunnel_keys(self, tunnel_name):                                 # remove stored WireGuard identity when tunnel is fully deleted
+        private_path = f"/var/lib/sdwan-cpe/keys/{tunnel_name}.private"
+        public_path = f"/var/lib/clixon/local-public-keys/{tunnel_name}.pub"
+    
+        for path in [private_path, public_path]:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+                    logging.info("Deleted WireGuard key file for tunnel %s: %s", tunnel_name, path)
+            except Exception as e:
+                logging.warning("Failed to delete WireGuard key file for tunnel %s path=%s: %s", tunnel_name, path, e)
+    
+        self.generated_tunnel_keys.pop(tunnel_name, None)                                 # remove runtime key cache so recreated tunnel generates new keys
+        
     
     def _get_forwarder_interface_state(self, interface_name):
         try:
@@ -2012,7 +2027,9 @@ class Agent:
 
         monitoring_start_candidates = []                                                          # class/tunnel objects that need monitoring start/update after commit
         monitoring_stop_candidates = []                                                           # class/tunnel objects that need monitoring stop after commit
-
+        
+        deleted_tunnel_candidates = []                                                            # fully deleted tunnels whose local key material must be removed after commit
+        
         controller_reconcile_needed = False                                                       # trigger controller peer resolution after tunnel create/change
 
         changed = root.find("changed")                                                            #contains leaf changes sent by the Clixon diff callback
@@ -2178,24 +2195,17 @@ class Agent:
         
                 if expected_leafs and expected_leafs.issubset(deleted_leafs):                         # all old tunnel children disappeared together
         
-                    logging.info(
-                        "Detected complete tunnel deletion: %s",
-                        tunnel_id
-                    )                                                                                 # complete list-entry deletion detected
+                    logging.info("Detected complete tunnel deletion: %s",tunnel_id)                   # complete list-entry deletion detected
         
                     operations.extend(
-                        self._build_operations_from_object(
-                            "tunnel",
-                            parent_dict,
-                            ["*"],
-                            delete=True
-                        )
-                    )                                                                                 # generate Forwarder DELETE for route and WireGuard tunnel
+                        self._build_operations_from_object("tunnel", parent_dict, ["*"], delete=True))       # generate Forwarder DELETE for route and WireGuard tunnel
         
                     monitoring_stop_candidates.append({
                         "object_type": "tunnel",
                         "parent_dict": parent_dict
                     })                                                                                # stop tunnel monitoring after successful commit
+
+                    deleted_tunnel_candidates.append(tunnel_id)                                       # defer local key deletion until commit succeeds
         
                 else:
         
@@ -2265,7 +2275,21 @@ class Agent:
                     item["object_type"],                                                    # class or tunnel
                     item["parent_dict"]                                                     # object data
                 )
-            if controller_reconcile_needed:
+
+            for tunnel_id in deleted_tunnel_candidates:
+                self._delete_wireguard_tunnel_keys(tunnel_id)                                # delete private/public key files and runtime key cache after committed tunnel deletion
+        
+                overlay = self.current_config_cache.get("overlay", {})
+                tunnels = self._as_list(overlay.get("tunnel", []))
+        
+                overlay["tunnel"] = [
+                    tunnel
+                    for tunnel in tunnels
+                    if not isinstance(tunnel, dict)
+                    or tunnel.get("name") != tunnel_id
+                ]                                                                             # prevent operational-state builder from republishing deleted tunnel from stale cache
+         
+        if controller_reconcile_needed:
                 logging.info("Tunnel configuration requires controller peer reconciliation")
                 threading.Thread(target=self._announce_to_controller, daemon=True).start()       # notify controller without delaying Clixon commit
         return {
