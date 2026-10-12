@@ -2258,11 +2258,7 @@ class Agent:
         if phase == "commit":
             for wan in nat_detection_candidates:
         
-                threading.Thread(
-                    target=self._wait_for_wan_ready,
-                    args=(wan,),
-                    daemon=True
-                ).start()                                                                       # wait for DHCP without blocking Clixon commit
+                threading.Thread(target=self._wait_for_wan_ready, args=(wan,), daemon=True).start()                                                                       # wait for DHCP without blocking Clixon commit
 
             for item in monitoring_start_candidates:                                        # start/update monitoring only after real commit
                 self._start_monitoring_for_object(                              
@@ -2289,9 +2285,9 @@ class Agent:
                     or tunnel.get("name") != tunnel_id
                 ]                                                                             # prevent operational-state builder from republishing deleted tunnel from stale cache
          
-        if controller_reconcile_needed:
-                logging.info("Tunnel configuration requires controller peer reconciliation")
-                threading.Thread(target=self._announce_to_controller, daemon=True).start()       # notify controller without delaying Clixon commit
+            if controller_reconcile_needed:
+                    logging.info("Tunnel configuration requires controller peer reconciliation")
+                    threading.Thread(target=self._announce_to_controller, daemon=True).start()       # notify controller without delaying Clixon commit
         return {
             "status": "ok",
             "phase": phase,
