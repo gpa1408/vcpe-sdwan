@@ -350,7 +350,7 @@
           type leafref {
             path "/scpe:sdwan/scpe:interfaces/scpe:underlay/scpe:wan-link/scpe:name";
           }
-          mandatory true;
+          //mandatory true;
           description
             "Local WAN link (Transport link Identifier) used by this CPE to establish the tunnel";
         }
