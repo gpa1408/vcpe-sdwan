@@ -2013,6 +2013,8 @@ class Agent:
         monitoring_start_candidates = []                                                          # class/tunnel objects that need monitoring start/update after commit
         monitoring_stop_candidates = []                                                           # class/tunnel objects that need monitoring stop after commit
 
+        controller_reconcile_needed = False                                                       # trigger controller peer resolution after tunnel create/change
+
         changed = root.find("changed")                                                            #contains leaf changes sent by the Clixon diff callback
         
         if changed is not None:
@@ -2067,8 +2069,18 @@ class Agent:
                 monitoring_start_candidates.append({                                         # if traffic class or tunnel changed, schedule monitoring start/update
                     "object_type": object_type,                                        
                     "parent_dict": parent_dict     })                                             # object data
-             
 
+            if object_type == "tunnel":
+                if any(
+                    leaf in changed_leafs
+                    for leaf in [
+                        "remote-cpe-id",
+                        "remote-tunnel-name",
+                        "bind-wan-link"
+                    ]
+                ):
+                    controller_reconcile_needed = True                                           # tunnel peer relationship changed, ask controller to resolve again
+            
         added = root.find("added")                                                      # contains newly added datastore objects
         
         if added is not None:
@@ -2082,6 +2094,9 @@ class Agent:
                 if added_xml is not None:
                     object_type = self._local_name(added_xml.tag)
                     parent_dict = self._xml_to_dict(added_xml)
+
+                    if object_type == "tunnel" and not parent_dict.get("resolved-peer"):
+                        controller_reconcile_needed = True                                               # new tunnel has no peer details, controller must resolve them
             
                     if object_type in ["class", "tunnel"]:
                         monitoring_start_candidates.append({
@@ -2254,6 +2269,9 @@ class Agent:
                     item["object_type"],                                                    # class or tunnel
                     item["parent_dict"]                                                     # object data
                 )
+            if controller_reconcile_needed:
+                logging.info("Tunnel configuration requires controller peer reconciliation")
+                self._announce_to_controller()                                                   # controller queries this CPE and peer CPE, then PATCHes resolved-peer
 
         return {
             "status": "ok",
