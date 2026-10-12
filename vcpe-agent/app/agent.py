@@ -2238,16 +2238,12 @@ class Agent:
                             "parent_dict": parent_dict
                         })                                                                            # stop monitoring after successful commit
                 
-        if not operations:                                                                  #if this config change has no forwarder mapping, return OK without sending anything
-            return {
-                "status": "ok",
-                "phase": phase,
-                "message": "No forwarder operation generated",
-                "operations": []}
+        forwarder_result = None
 
-        forwarder_result = self._send_forwarder_transaction(
-            operations=operations,
-            validate_only=validate_only)
+        if operations:
+            forwarder_result = self._send_forwarder_transaction(
+                operations=operations,
+                validate_only=validate_only)                                                           # send transaction only when Forwarder operations exist
 
         if phase == "commit":
             for wan in nat_detection_candidates:
@@ -2271,8 +2267,7 @@ class Agent:
                 )
             if controller_reconcile_needed:
                 logging.info("Tunnel configuration requires controller peer reconciliation")
-                self._announce_to_controller()                                                   # controller queries this CPE and peer CPE, then PATCHes resolved-peer
-
+                threading.Thread(target=self._announce_to_controller, daemon=True).start()       # notify controller without delaying Clixon commit
         return {
             "status": "ok",
             "phase": phase,
