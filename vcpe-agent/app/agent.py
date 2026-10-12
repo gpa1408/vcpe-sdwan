@@ -1468,7 +1468,7 @@ class Agent:
         return match
 
     def _build_operations_from_object(self, object_type, parent_dict, changed_leafs, delete=False):
-    
+
         if object_type == "wan-link":
             return self._build_wan_link_operations(
                 parent_dict,
@@ -1548,7 +1548,24 @@ class Agent:
                 )                                                                                   # build Forwarder operations for each LAN link
     
             return operations                                                                       # return all generated LAN operations
-    
+
+        if object_type == "overlay":
+            operations = []
+
+            for tunnel in self._as_list(parent_dict.get("tunnel")):
+                if not isinstance(tunnel, dict):
+                    continue
+
+                operations.extend(
+                    self._build_tunnel_operations(
+                        tunnel,
+                        changed_leafs,
+                        delete
+                    )
+                )
+
+            return operations
+            
         if object_type == "tunnel":
             return self._build_tunnel_operations(
                 parent_dict,
@@ -2112,13 +2129,29 @@ class Agent:
                     object_type = self._local_name(added_xml.tag)
                     parent_dict = self._xml_to_dict(added_xml)
 
-                    if object_type == "tunnel" and not parent_dict.get("resolved-peer"):
-                        controller_reconcile_needed = True                                               # new tunnel has no peer details, controller must resolve them
-            
-                    if object_type in ["class", "tunnel"]:
+                    if object_type == "tunnel":
+                        if not parent_dict.get("resolved-peer"):
+                            controller_reconcile_needed = True
+                    
                         monitoring_start_candidates.append({
-                            "object_type": object_type,
-                            "parent_dict": parent_dict })
+                            "object_type": "tunnel",
+                            "parent_dict": parent_dict
+                        })
+                    
+                    elif object_type == "overlay":
+                    
+                        for tunnel in self._as_list(parent_dict.get("tunnel")):
+                    
+                            if not isinstance(tunnel, dict):
+                                continue
+                    
+                            if not tunnel.get("resolved-peer"):
+                                controller_reconcile_needed = True
+                    
+                            monitoring_start_candidates.append({
+                                "object_type": "tunnel",
+                                "parent_dict": tunnel
+                            })
 
                     if object_type == "wan-link":
                         nat_detection_candidates.append(parent_dict)                                # direct WAN-link was added
@@ -2134,7 +2167,6 @@ class Agent:
                         for wan_link in self._as_list(underlay.get("wan-link")):                     # get WAN links nested under interfaces
                             if isinstance(wan_link, dict):
                                 nat_detection_candidates.append(wan_link)                             # schedule NAT discovery for each WAN
-
 
         deleted = root.find("deleted")                                                               # contains deleted datastore objects
         
