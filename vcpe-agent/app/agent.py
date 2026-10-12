@@ -1300,7 +1300,7 @@ class Agent:
             if "listen_port" in tunnel_payload and "local_addresses" in tunnel_payload:
                 operations.append(self._operation("PUT", f"/api/v1/tunnels/wireguard/{tunnel_id}", tunnel_payload))
     
-        peer_change_leafs = ["peer-address", "peer-port", "peer-public-key", "allowed-prefix", "keepalive-seconds", "resolved-peer"]
+        peer_change_leafs = ["peer-address", "peer-port", "peer-public-key", "allowed-prefix", "keepalive-seconds", "resolved-peer", "admin-enabled"]
         if self._has_change(changed_leafs, *peer_change_leafs):
             peer_operation = self._build_wireguard_peer_operation(parent_dict)
             if peer_operation:
