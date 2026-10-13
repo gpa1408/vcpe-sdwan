@@ -692,22 +692,28 @@ class Agent:
                 if not tunnel_name:
                     continue                                                              # skip invalid tunnel objects
     
-                key_data = self.generated_tunnel_keys.get(tunnel_name, {})                 # check currently loaded WireGuard keys
-                public_key = key_data.get("public-key")                                    # read local public key
-    
+                key_data = self.generated_tunnel_keys.get(tunnel_name, {})
+                public_key = key_data.get("public-key")
+                
+                # Operational-state publishing must never create new keys.
+                # Keys are created only when a tunnel is actually configured/reconciled.
                 if not public_key:
-                    private_key, public_key, private_path = \
-                        self._generate_wireguard_tunnel_keys(tunnel_name)                  # recover existing keys or generate them
-    
-                    if private_key and public_key:
-                        self.generated_tunnel_keys[tunnel_name] = {
-                            "private-key": private_key,
-                            "public-key": public_key,
-                            "private-path": private_path
-                        }                                                                  # restore key information into runtime memory
-    
+                    public_path = f"/var/lib/clixon/local-public-keys/{tunnel_name}.pub"
+                
+                    if os.path.exists(public_path):
+                        try:
+                            with open(public_path, "r") as f:
+                                public_key = f.read().strip()
+                        except Exception as e:
+                            logging.warning(
+                                "Failed to read public key for tunnel %s: %s",
+                                tunnel_name,
+                                e
+                            )
+                            public_key = None
+                
                 if not public_key:
-                    continue                                                              # skip if key is unavailable
+                    continue
     
                 xml_parts.append("<tunnel>")                                               # open tunnel list entry
                 xml_parts.append(
