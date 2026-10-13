@@ -2142,6 +2142,10 @@ class Agent:
                                     delete=False
                                 )
                             )
+                            monitoring_start_candidates.append({
+                                "object_type": "tunnel",
+                                "parent_dict": tunnel_dict
+                            })
 
                     else:
                         operations.extend(
@@ -2156,26 +2160,24 @@ class Agent:
                     if object_type == "tunnel":
                         if not parent_dict.get("resolved-peer"):
                             controller_reconcile_needed = True
-                    
-                        monitoring_start_candidates.append({
-                            "object_type": "tunnel",
-                            "parent_dict": parent_dict
-                        })
+                        else:
+                            monitoring_start_candidates.append({
+                                "object_type": "tunnel",
+                                "parent_dict": parent_dict
+                            })
                     
                     elif object_type == "overlay":
-                    
                         for tunnel in self._as_list(parent_dict.get("tunnel")):
-                    
                             if not isinstance(tunnel, dict):
                                 continue
                     
                             if not tunnel.get("resolved-peer"):
                                 controller_reconcile_needed = True
-                    
-                            monitoring_start_candidates.append({
-                                "object_type": "tunnel",
-                                "parent_dict": tunnel
-                            })
+                            else:
+                                monitoring_start_candidates.append({
+                                    "object_type": "tunnel",
+                                    "parent_dict": tunnel
+                                })
 
                     if object_type == "wan-link":
                         nat_detection_candidates.append(parent_dict)                                # direct WAN-link was added
