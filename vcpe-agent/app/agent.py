@@ -1967,7 +1967,10 @@ class Agent:
                         )
     
                 for tunnel in tunnels:
-                    if isinstance(tunnel, dict):
+                    if (
+                        isinstance(tunnel, dict)
+                        and tunnel.get("resolved-peer")
+                    ):
                         self._start_monitoring_for_object(
                             "tunnel",
                             tunnel
@@ -2099,21 +2102,36 @@ class Agent:
                     changed_leafs,
                     delete=False))
             
-            if object_type in ["class", "tunnel"]:                                     
-                monitoring_start_candidates.append({                                         # if traffic class or tunnel changed, schedule monitoring start/update
-                    "object_type": object_type,                                        
-                    "parent_dict": parent_dict     })                                             # object data
-
-            if object_type == "tunnel":
-                if any(
+            if object_type == "class":
+                monitoring_start_candidates.append({
+                    "object_type": "class",
+                    "parent_dict": parent_dict
+                })
+            
+            elif object_type == "tunnel":
+            
+                peer_relationship_changed = any(
                     leaf in changed_leafs
                     for leaf in [
                         "remote-cpe-id",
                         "remote-tunnel-name",
                         "bind-wan-link"
                     ]
+                )
+            
+                if peer_relationship_changed:
+                    controller_reconcile_needed = True
+            
+                # Start/update tunnel monitoring only if peer information is already valid.
+                # If peer relationship changed, wait for Controller to PATCH resolved-peer.
+                if (
+                    parent_dict.get("resolved-peer")
+                    and not peer_relationship_changed
                 ):
-                    controller_reconcile_needed = True                                           # tunnel peer relationship changed, ask controller to resolve again
+                    monitoring_start_candidates.append({
+                        "object_type": "tunnel",
+                        "parent_dict": parent_dict
+                    })                                         
             
         added = root.find("added")                                                      # contains newly added datastore objects
         
