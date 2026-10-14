@@ -2154,6 +2154,16 @@ class Agent:
                         ):
                             added_xml = class_xml
                             object_type = "class"
+
+                    if object_type == "policy":
+                        steering_xml = self._first_child(added_xml)
+                    
+                        if (
+                            steering_xml is not None
+                            and self._local_name(steering_xml.tag) == "steering"
+                        ):
+                            added_xml = steering_xml
+                            object_type = "steering"
                 
                     if object_type == "resolved-peer":
                         parent_data = node.find("parent-data")
