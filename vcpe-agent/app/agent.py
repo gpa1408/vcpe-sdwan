@@ -2149,6 +2149,16 @@ class Agent:
             
                 if added_xml is not None:
                     object_type = self._local_name(added_xml.tag)
+
+                    if object_type == "traffic":                                        # Clixon may report a newly created traffic class using the parent <traffic> container. 
+                        class_xml = self._first_child(added_xml)
+                    
+                        if (
+                            class_xml is not None
+                            and self._local_name(class_xml.tag) == "class"              # Normalize it to the actual <class>.
+                        ):
+                            added_xml = class_xml
+                            object_type = "class"
                 
                     if object_type == "resolved-peer":
                         parent_data = node.find("parent-data")
