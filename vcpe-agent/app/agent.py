@@ -1992,15 +1992,10 @@ class Agent:
     
                 self.startup_reconciled = True
     
-                logging.info(
-                    "Startup reconciliation completed successfully"
-                )
+                logging.info("Startup reconciliation completed successfully" )
     
             except Exception as e:
-                logging.exception(
-                    "Startup reconciliation failed: %s",
-                    e
-                )
+                logging.exception("Startup reconciliation failed: %s", e)
     
             finally:
                 # Do not leave the normal runtime loop blocked forever.
@@ -2316,9 +2311,20 @@ class Agent:
         
         
             for node in other_deleted_nodes:
-        
                 data = node.find("data")                                                              # actual deleted object
                 deleted_xml = self._first_child(data)                                                 # extract deleted object XML
+
+                if (
+                    deleted_xml is not None
+                    and self._local_name(deleted_xml.tag) == "traffic"                                # Clixon may wrap a deleted traffic class in <traffic>.
+                ):
+                    class_xml = self._first_child(deleted_xml)
+                
+                    if (
+                        class_xml is not None
+                        and self._local_name(class_xml.tag) == "class"
+                    ):
+                        deleted_xml = class_xml
         
                 operations.extend(
                     self._build_operations_from_parent_xml(
