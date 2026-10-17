@@ -20,16 +20,6 @@
      policy based steering, firewall configuration, forwarder facing path objects, path groups, NAT services, static routing, and
      operational state reporting.";
 
-  revision 2026-05-12 {
-    description
-      "Revised  model aligned with SD-WAN Forwarder API.";
-  }
-
-  revision 2026-03-13 {
-    description
-      "revision4n";
-  }
-
   /*
    * ======================================================================================================
    * Typedefs
@@ -360,7 +350,7 @@
           type leafref {
             path "/scpe:sdwan/scpe:interfaces/scpe:underlay/scpe:wan-link/scpe:name";
           }
-          mandatory true;
+          //mandatory true;
           description
             "Local WAN link (Transport link Identifier) used by this CPE to establish the tunnel";
         }
@@ -403,14 +393,14 @@
 
         leaf remote-cpe-id {
           type string;
-          mandatory true;
+          //mandatory true;
           description
             "Identifier of the remote CPE that this tunnel should connect to.";
         }
 
         leaf remote-tunnel-name {
           type string;
-          mandatory true;
+          //mandatory true;
           description
             "Tunnel name on the remote CPE. The controller uses remote-cpe-id and remote-tunnel-name to find the matching tunnel in the peer CPE datastore.";
         }
@@ -423,6 +413,8 @@
         }
 
         container resolved-peer {
+          presence "Indicates that the remote WireGuard peer has been resolved by the controller";
+
           leaf peer-address {
             type inet:ipv4-address;
             mandatory true;
@@ -744,6 +736,18 @@
           type port-number-or-any;
           description
             "One or more destination ports to match, or any";
+        }
+
+        leaf in-interface {
+          type string;
+          description
+            "Ingress interface to match for this firewall rule.";
+        }
+        
+        leaf out-interface {
+          type string;
+          description
+            "Egress interface to match for this firewall rule.";
         }
 
         leaf log {

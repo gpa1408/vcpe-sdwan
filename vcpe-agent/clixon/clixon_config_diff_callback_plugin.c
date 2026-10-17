@@ -58,7 +58,224 @@ is_nested_container_for_agent(const char *name)
 
     return 0;
 }
+/*
+ * Return true if this XML node represents one complete configuration
+ * object understood by the CPE Agent.
+ *
+ * These are the object levels used by the Agent's Forwarder builders.
+ */
+static int
+is_agent_object(const char *name)
+{
+    if (name == NULL)
+        return 0;
 
+    if (strcmp(name, "wan-link") == 0)
+        return 1;
+
+    if (strcmp(name, "lan-link") == 0)
+        return 1;
+
+    if (strcmp(name, "tunnel") == 0)
+        return 1;
+
+    if (strcmp(name, "class") == 0)
+        return 1;
+
+    if (strcmp(name, "rule") == 0)
+        return 1;
+
+    /*
+     * Steering is an Agent semantic object even though it does not
+     * correspond to a persistent Forwarder configuration object.
+     * Runtime steering is handled by the Agent.
+     */
+    if (strcmp(name, "steering") == 0)
+        return 1;
+
+    return 0;
+}
+
+
+/*
+ * Find one direct element child with the requested name.
+ *
+ * Used for wrapper cases such as:
+ *
+ *     <traffic>
+ *         <class>...</class>
+ *     </traffic>
+ *
+ * and:
+ *
+ *     <policy>
+ *         <steering>...</steering>
+ *     </policy>
+ *
+ * The child is returned only when exactly one matching child exists.
+ * This avoids silently selecting one object if a wrapper contains
+ * multiple list entries.
+ */
+static cxobj *
+find_single_direct_child(cxobj *parent, const char *wanted_name)
+{
+    cxobj *child = NULL;
+    cxobj *match = NULL;
+    int count = 0;
+
+    if (parent == NULL || wanted_name == NULL)
+        return NULL;
+
+    while ((child = xml_child_each(parent, child, CX_ELMNT)) != NULL) {
+
+        const char *child_name = xml_name(child);
+
+        if (child_name != NULL &&
+            strcmp(child_name, wanted_name) == 0) {
+
+            match = child;
+            count++;
+
+            if (count > 1)
+                return NULL;
+        }
+    }
+
+    return count == 1 ? match : NULL;
+}
+
+
+/*
+ * Resolve the complete Agent configuration object that owns a
+ * raw Clixon diff node.
+ *
+ * Examples:
+ *
+ *   dst-port
+ *       -> five-tuple
+ *       -> class
+ *
+ *   allowed-prefix
+ *       -> resolved-peer
+ *       -> tunnel
+ *
+ *   pool-start
+ *       -> dhcp-server
+ *       -> lan-link
+ *
+ *   peer-address
+ *       -> resolved-peer
+ *       -> tunnel
+ *
+ * For wrapper objects reported by the diff:
+ *
+ *   traffic -> class       (only when exactly one class is present)
+ *   policy  -> steering    (only when exactly one steering entry is present)
+ *
+ * Raw diff information is NOT replaced by this function.
+ * It is emitted separately as object-data metadata.
+ */
+static cxobj *
+find_agent_object(cxobj *x)
+{
+    cxobj *current = NULL;
+    cxobj *child = NULL;
+    const char *name = NULL;
+
+    if (x == NULL)
+        return NULL;
+
+    /*
+     * First walk upward. This handles normal leaf/container changes.
+     */
+    current = x;
+
+    while (current != NULL) {
+
+        name = xml_name(current);
+
+        if (is_agent_object(name))
+            return current;
+
+        current = xml_parent(current);
+    }
+
+    /*
+     * Some ADD/DELETE diffs may expose a wrapper instead of the
+     * actual list entry.
+     */
+    name = xml_name(x);
+
+    if (name != NULL && strcmp(name, "traffic") == 0) {
+
+        child = find_single_direct_child(x, "class");
+
+        if (child != NULL)
+            return child;
+    }
+
+    if (name != NULL && strcmp(name, "policy") == 0) {
+
+        child = find_single_direct_child(x, "steering");
+
+        if (child != NULL)
+            return child;
+    }
+
+    if (name != NULL && strcmp(name, "firewall") == 0) {
+
+        child = find_single_direct_child(x, "rule");
+
+        if (child != NULL)
+            return child;
+    }
+
+    return NULL;
+}
+
+/*
+ * Append normalized semantic-object metadata without modifying the
+ * original diff information.
+ *
+ * Result:
+ *
+ *   <object-type>tunnel</object-type>
+ *   <object-data>
+ *       <tunnel>...</tunnel>
+ *   </object-data>
+ */
+static int
+append_agent_object(cbuf *cb, cxobj *x)
+{
+    cxobj *object = NULL;
+    const char *object_name = NULL;
+
+    if (cb == NULL || x == NULL)
+        return 0;
+
+    object = find_agent_object(x);
+
+    if (object == NULL)
+        return 0;
+
+    object_name = xml_name(object);
+
+    if (object_name == NULL)
+        return 0;
+
+    cprintf(cb,
+            "<object-type>%s</object-type>",
+            object_name);
+
+    cprintf(cb, "<object-data>");
+
+    if (append_xml_node(cb, object) < 0)
+        return -1;
+
+    cprintf(cb, "</object-data>");
+
+    return 0;
+}
 
 /*
  * Append useful parent XML node of a changed node.
@@ -127,6 +344,11 @@ append_parent_xml_node(cbuf *cb, cxobj *x)
 
 /*
  * Append added or deleted nodes.
+ *
+ * Raw diff information is preserved exactly as before.
+ *
+ * In addition, object-type/object-data identify the complete
+ * Agent configuration object that owns the changed node.
  */
 static int
 append_node_vector(cbuf *cb, const char *tag, cxobj **vec, size_t len)
@@ -136,8 +358,15 @@ append_node_vector(cbuf *cb, const char *tag, cxobj **vec, size_t len)
     cprintf(cb, "<%s>", tag);
 
     for (i = 0; i < len; i++) {
+
         cprintf(cb, "<node>");
 
+        /*
+         * RAW DIFF NODE
+         *
+         * Keep this unchanged because the Agent still needs the actual
+         * leaf/container that Clixon reported.
+         */
         cprintf(cb, "<node-name>%s</node-name>",
                 xml_name(vec[i]) ? xml_name(vec[i]) : "");
 
@@ -146,10 +375,21 @@ append_node_vector(cbuf *cb, const char *tag, cxobj **vec, size_t len)
             return -1;
         cprintf(cb, "</data>");
 
+        /*
+         * EXISTING PARENT INFORMATION
+         *
+         * Keep this for backward compatibility with the current Agent.
+         */
         cprintf(cb, "<parent-data>");
         if (append_parent_xml_node(cb, vec[i]) < 0)
             return -1;
         cprintf(cb, "</parent-data>");
+
+        /*
+         * NEW NORMALIZED AGENT OBJECT
+         */
+        if (append_agent_object(cb, vec[i]) < 0)
+            return -1;
 
         cprintf(cb, "</node>");
     }
@@ -200,6 +440,12 @@ append_changed_pairs(cbuf *cb, transaction_data td)
             if (append_parent_xml_node(cb, oldv[i]) < 0)
                 return -1;
             cprintf(cb, "</parent-data>");
+
+            /*
+             * Complete semantic object containing the OLD value.
+             */
+            if (append_agent_object(cb, oldv[i]) < 0)
+                return -1;
         }
         cprintf(cb, "</old>");
 
@@ -220,6 +466,12 @@ append_changed_pairs(cbuf *cb, transaction_data td)
             if (append_parent_xml_node(cb, newv[i]) < 0)
                 return -1;
             cprintf(cb, "</parent-data>");
+
+            /*
+             * Complete semantic object containing the NEW value.
+             */
+            if (append_agent_object(cb, newv[i]) < 0)
+                return -1;
         }
         cprintf(cb, "</new>");
 

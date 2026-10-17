@@ -49,6 +49,10 @@ class Agent:
         self.forwarder_base_url = "http://host.docker.internal:9090"                  # fixed forwarder API URL used by the agent
         self.forwarder_dry_run = False                                                # If forwarder is not ready yet,a dry-run "true" (false send real API calls)
 
+        self.startup_reconciled = False
+        self.startup_reconcile_started = False
+        self.startup_reconcile_lock = threading.Lock()
+        self.startup_reconcile_event = threading.Event()
     # =====================================================================================
     # Basic helpers
     # =====================================================================================
@@ -72,6 +76,43 @@ class Agent:
             return None
         children = list(element)                                                      # gets all direct child XML nodes inside this element
         return children[0] if children else None                                      # returns the real object inside wrappers like parent data
+
+    def _callback_object_xml(self, wrapper, fallback="data"):
+        """
+        Return the normalized semantic configuration object sent by the
+        Clixon callback plugin.
+    
+        New callback format:
+            <object-data>
+                <class|tunnel|wan-link|lan-link|rule|steering>...</...>
+            </object-data>
+    
+        Backward compatibility:
+            If object-data is not present, preserve the previous Agent
+            behavior by falling back either to <data> or <parent-data>.
+        """
+    
+        if wrapper is None:
+            return None
+    
+        # -------------------------------------------------------------
+        # Preferred new callback contract
+        # -------------------------------------------------------------
+        object_data = wrapper.find("object-data")
+        object_xml = self._first_child(object_data)
+    
+        if object_xml is not None:
+            return object_xml
+    
+        # -------------------------------------------------------------
+        # Backward compatibility with the old callback
+        # -------------------------------------------------------------
+        if fallback == "parent":
+            parent_data = wrapper.find("parent-data")
+            return self._first_child(parent_data)
+    
+        data = wrapper.find("data")
+        return self._first_child(data)
 
     def _bool_value(self, value):                                                     # converts YANG/Clixon boolean text into real Python boolean without adding Python defaults
         if value is None:
@@ -184,6 +225,21 @@ class Agent:
         except Exception as e:
             logging.exception("Failed to get or create WireGuard keys for tunnel %s: %s", tunnel_name, e)
             return None, None, None
+
+    def _delete_wireguard_tunnel_keys(self, tunnel_name):                                 # remove stored WireGuard identity when tunnel is fully deleted
+        private_path = f"/var/lib/sdwan-cpe/keys/{tunnel_name}.private"
+        public_path = f"/var/lib/clixon/local-public-keys/{tunnel_name}.pub"
+    
+        for path in [private_path, public_path]:
+            try:
+                if os.path.exists(path):
+                    os.remove(path)
+                    logging.info("Deleted WireGuard key file for tunnel %s: %s", tunnel_name, path)
+            except Exception as e:
+                logging.warning("Failed to delete WireGuard key file for tunnel %s path=%s: %s", tunnel_name, path, e)
+    
+        self.generated_tunnel_keys.pop(tunnel_name, None)                                 # remove runtime key cache so recreated tunnel generates new keys
+        
     
     def _get_forwarder_interface_state(self, interface_name):
         try:
@@ -250,34 +306,56 @@ class Agent:
             status_reason = "CPE agent and forwarder are operational"
     
         except Exception as e:
-            logging.warning("Forwarder health check failed: %s", e)
+            logging.warning(
+                "Forwarder health check failed: %s",
+                e
+            )
     
         if forwarder_status == "healthy":
             oper_status = "up"
-        elif forwarder_status == "down":
-            oper_status = "degraded"
         else:
-            oper_status = "unknown"
+            oper_status = "degraded"
     
         self.latest_cpe_state = {
             "oper-status": oper_status,
             "power-status": "powered-on",
             "forwarder-status": forwarder_status,
             "forwarder-version": forwarder_version,
-            "uptime-seconds": int(time.time() - self.agent_start_time),
+            "uptime-seconds": int(
+                time.time() - self.agent_start_time
+            ),
             "last-seen": now_ts,
             "status-reason": status_reason
         }
+    
+        return forwarder_status == "healthy"
 
+    def _wait_for_forwarder_healthy(self, timeout_sec=60, interval_sec=2):
+    
+        logging.info("Waiting for Forwarder health before startup reconciliation" )
+    
+        start_time = time.time()
+    
+        while time.time() - start_time < timeout_sec:
+            if self._update_cpe_state():
+                logging.info("Forwarder health check passed")
+                return True
+    
+            logging.warning("Forwarder not healthy yet; retrying in %s seconds", interval_sec)
+    
+            time.sleep(interval_sec)
+    
+        logging.error("Forwarder did not become healthy within %s seconds", timeout_sec)
+    
+        return False
+    
     def _wait_for_wan_ready(self, wan, timeout_sec=30):
         wan_name = wan.get("name")
         interface_name = wan.get("interface-name")
         role = wan.get("role")
     
         if not wan_name or not interface_name:
-            logging.warning(
-                "WAN readiness check skipped because WAN name or interface is missing"
-            )
+            logging.warning("WAN readiness check skipped because WAN name or interface is missing")
             return
     
         logging.info(
@@ -387,6 +465,56 @@ class Agent:
     
         except Exception as e:
             logging.warning("CPE registration with controller failed: %s", e)
+            return False
+            
+    def _send_cpe_health_to_controller(self):
+        try:
+            current_config = self.config_reader.get_intended_config()
+            system = current_config.get("system", {})
+    
+            cpe_id = system.get("local-cpe-id")
+            controller_ip = system.get("controller-ip")
+            controller_port = system.get("controller-port")
+    
+            if not cpe_id:
+                logging.info(
+                    "Skipping CPE health report because local-cpe-id is not assigned yet"
+                )
+                return False
+    
+            if not controller_ip or not controller_port:
+                logging.warning(
+                    "Cannot send CPE health report because controller address is missing"
+                )
+                return False
+    
+            url = (
+                f"http://{controller_ip}:"
+                f"{controller_port}"
+                f"/healthcheck/{cpe_id}"
+            )
+    
+            response = requests.put(
+                url,
+                json={"reachable": True},
+                timeout=5
+            )
+    
+            response.raise_for_status()
+    
+            logging.info(
+                "CPE reachability reported to controller: cpe-id=%s",
+                cpe_id
+            )
+    
+            return True
+    
+        except Exception as e:
+            logging.warning(
+                "Failed to report CPE reachability to controller: %s",
+                e
+            )
+    
             return False
     # =====================================================================================
     # Publish operations data in Datastore
@@ -601,22 +729,28 @@ class Agent:
                 if not tunnel_name:
                     continue                                                              # skip invalid tunnel objects
     
-                key_data = self.generated_tunnel_keys.get(tunnel_name, {})                 # check currently loaded WireGuard keys
-                public_key = key_data.get("public-key")                                    # read local public key
-    
+                key_data = self.generated_tunnel_keys.get(tunnel_name, {})
+                public_key = key_data.get("public-key")
+                
+                # Operational-state publishing must never create new keys.
+                # Keys are created only when a tunnel is actually configured/reconciled.
                 if not public_key:
-                    private_key, public_key, private_path = \
-                        self._generate_wireguard_tunnel_keys(tunnel_name)                  # recover existing keys or generate them
-    
-                    if private_key and public_key:
-                        self.generated_tunnel_keys[tunnel_name] = {
-                            "private-key": private_key,
-                            "public-key": public_key,
-                            "private-path": private_path
-                        }                                                                  # restore key information into runtime memory
-    
+                    public_path = f"/var/lib/clixon/local-public-keys/{tunnel_name}.pub"
+                
+                    if os.path.exists(public_path):
+                        try:
+                            with open(public_path, "r") as f:
+                                public_key = f.read().strip()
+                        except Exception as e:
+                            logging.warning(
+                                "Failed to read public key for tunnel %s: %s",
+                                tunnel_name,
+                                e
+                            )
+                            public_key = None
+                
                 if not public_key:
-                    continue                                                              # skip if key is unavailable
+                    continue
     
                 xml_parts.append("<tunnel>")                                               # open tunnel list entry
                 xml_parts.append(
@@ -871,13 +1005,27 @@ class Agent:
 
     def run_steering_loop_after_restconf_ready(self, interval_sec=10):
         if not self.wait_for_restconf():                                                # wait until Clixon RESTCONF is ready
-            return                                                                      # stop startup if RESTCONF is not ready
-
+            return
+    
         self.current_config_cache = self.config_reader.get_intended_config()            # populate cache once at startup
-            
-        self._sync_fwmarks_from_forwarder()                                             # recover existing fwmarks from forwarder after router/agent reboot (only once)
-        self.discover_nat_for_all_wans()                                                # initial NAT discovery for all WANs
-        self._announce_to_controller()                                                  # send one initial CPE registration to controller
+    
+        logging.info("Waiting for startup reconciliation before steering loop")
+    
+        # Normally transaction-id 0 triggers reconciliation.
+        # Timeout prevents the Agent from being permanently blocked
+        
+        reconciliation_triggered = self.startup_reconcile_event.wait(timeout=10)         
+    
+        if not reconciliation_triggered:
+            logging.warning( "No Clixon transaction 0 reconciliation received; "        # if Clixon does not deliver transaction 0 for some reason.
+                "running startup reconciliation as fallback"
+            )
+    
+            self.startup_reconcile_started = True
+            self.reconcile_startup_state()
+    
+        logging.info( "Startup recovery finished; starting runtime steering loop")
+    
         self.run_forever(interval_sec=interval_sec)
         
     # =====================================================================================
@@ -971,7 +1119,7 @@ class Agent:
     
             data = response.json()                                                        # parse forwarder JSON response body
     
-            flow_policies = data.get("flow_policies", [])                                 # expected list of stored flow policies
+            flow_policies = data.get("items", data.get("flow_policies", []))              # expected list of stored flow policies
     
             for policy in flow_policies:                                                  # loop through each flow policy returned by forwarder
                 policy_id = (                                                             # accept possible naming variations from forwarder
@@ -1012,7 +1160,7 @@ class Agent:
         except Exception as e:                                                            # catch connection, timeout, JSON, or other errors
             logging.exception("Failed to sync fwmarks from forwarder: %s", e)             # do not stop agent if startup recovery fails
     
-    def _send_forwarder_transaction(self, operations, validate_only):
+    def _send_forwarder_transaction(self, operations, validate_only, timeout=10):
         payload = {
             "validate_only": validate_only,                                              # "True" during Clixon validate phase, "False" during commit phase. Detection happens in happens in handle_clixon_transaction()
             "operations": operations}                                                    # all forwarder operations are sent as one transaction
@@ -1027,7 +1175,7 @@ class Agent:
                 "payload": payload}
 
         url = f"{self.forwarder_base_url}/api/v1/transactions"
-        response = requests.post(url, json=payload, timeout=10)                            #send the transaction to the forwarder API
+        response = requests.post(url, json=payload, timeout=timeout)                            #send the transaction to the forwarder API
         response.raise_for_status()
 
         logging.info("Forwarder response body: %s", response.text)                         # log actual response body for debugging
@@ -1062,8 +1210,7 @@ class Agent:
         operations = []                                                                   #stores the forwarder operations generated for this object
 
         if delete:
-            operations.append(self._operation("PUT", f"/api/v1/interfaces/{interface_name}/state", {"state": "down"}))
-            operations.append(self._operation("DELETE", f"/api/v1/routes/static/{route_set_id}"))
+            operations.append(self._operation("DELETE", f"/api/v1/interfaces/{interface_name}/configuration") )     # Complete removal of Forwarder managed WAN configuration.
             return operations
 
         if self._has_change(changed_leafs, "admin-enabled") and admin_enabled is not None:
@@ -1174,7 +1321,8 @@ class Agent:
             return []
     
         if delete:
-            return [self._operation("DELETE", f"/api/v1/tunnels/wireguard/{tunnel_id}")]
+            return [self._operation("DELETE",  f"/api/v1/routes/static/{tunnel_id}-peer-routes"),
+                    self._operation("DELETE", f"/api/v1/tunnels/wireguard/{tunnel_id}" )]
     
         if tunnel_id not in self.generated_tunnel_keys:
             private_key, public_key, private_path = self._generate_wireguard_tunnel_keys(tunnel_id)
@@ -1188,6 +1336,7 @@ class Agent:
     
         admin_enabled = self._bool_value(parent_dict.get("admin-enabled"))
         if self._has_change(changed_leafs, "admin-enabled") and admin_enabled is False:
+            operations.append(self._operation("DELETE", f"/api/v1/routes/static/{tunnel_id}-peer-routes"))
             operations.append(self._operation("DELETE", f"/api/v1/tunnels/wireguard/{tunnel_id}"))
             return operations
     
@@ -1207,14 +1356,34 @@ class Agent:
             tunnel_payload["description"] = f"WireGuard tunnel {tunnel_id}"
     
             if "listen_port" in tunnel_payload and "local_addresses" in tunnel_payload:
-                operations.append(self._operation("PUT", f"/api/v1/tunnels/wireguard/{tunnel_id}", tunnel_payload))
+                if any(leaf in changed_leafs for leaf in tunnel_change_leafs):
+                    operations.append(self._operation("PUT",  f"/api/v1/tunnels/wireguard/{tunnel_id}", tunnel_payload,))
     
-        peer_change_leafs = ["peer-address", "peer-port", "peer-public-key", "allowed-prefix", "keepalive-seconds", "resolved-peer"]
+        peer_change_leafs = ["peer-address", "peer-port", "peer-public-key", "allowed-prefix", "keepalive-seconds", "resolved-peer", "admin-enabled"]
         if self._has_change(changed_leafs, *peer_change_leafs):
             peer_operation = self._build_wireguard_peer_operation(parent_dict)
             if peer_operation:
                 operations.append(peer_operation)
+
+            resolved_peer = parent_dict.get("resolved-peer", {})
+            allowed_prefixes = []
+
+            for prefix in self._as_list(resolved_peer.get("allowed-prefix")):
+                try:
+                    allowed_prefixes.append(str(ipaddress.ip_network(prefix, strict=False)))
+                except ValueError:
+                    logging.warning("Ignoring invalid WireGuard allowed-prefix: %s", prefix)
     
+            if allowed_prefixes:
+                route_payload = { "routes": [] }
+        
+                for prefix in allowed_prefixes:
+                    route_payload["routes"].append({
+                        "destination_cidr": prefix,
+                        "out_interface": tunnel_id   })
+        
+                operations.append(
+                    self._operation( "PUT",  f"/api/v1/routes/static/{tunnel_id}-peer-routes", route_payload ))     #Install remote prefixes through this WireGuard tunnel
         return operations
 
     def _build_wireguard_peer_operation(self, tunnel):
@@ -1227,7 +1396,12 @@ class Agent:
         peer_address = resolved_peer.get("peer-address")
         peer_port = resolved_peer.get("peer-port")
         peer_public_key = resolved_peer.get("peer-public-key")
-        allowed_prefixes = self._as_list(resolved_peer.get("allowed-prefix"))
+        allowed_prefixes = []
+        for prefix in self._as_list(resolved_peer.get("allowed-prefix")):
+            try:
+                allowed_prefixes.append(str(ipaddress.ip_network(prefix, strict=False)))
+            except ValueError:
+                logging.warning("Ignoring invalid WireGuard allowed-prefix: %s", prefix )
         keepalive = tunnel.get("keepalive-seconds")
 
         peer_payload = {}
@@ -1320,6 +1494,8 @@ class Agent:
         match = {}                                                                         #traffic match fields such as prefixes, ports and protocol
         self._add_if_not_none(match, "src_prefix", parent_dict.get("src-prefix"))
         self._add_if_not_none(match, "dst_prefix", parent_dict.get("dst-prefix"))
+        self._add_if_not_none(match, "in_interface", parent_dict.get("in-interface"))
+        self._add_if_not_none(match, "out_interface",parent_dict.get("out-interface"))
 
         protocol = parent_dict.get("l4-protocol")
         if protocol:
@@ -1336,7 +1512,7 @@ class Agent:
         return match
 
     def _build_operations_from_object(self, object_type, parent_dict, changed_leafs, delete=False):
-    
+
         if object_type == "wan-link":
             return self._build_wan_link_operations(
                 parent_dict,
@@ -1416,7 +1592,24 @@ class Agent:
                 )                                                                                   # build Forwarder operations for each LAN link
     
             return operations                                                                       # return all generated LAN operations
-    
+
+        if object_type == "overlay":
+            operations = []
+
+            for tunnel in self._as_list(parent_dict.get("tunnel")):
+                if not isinstance(tunnel, dict):
+                    continue
+
+                operations.extend(
+                    self._build_tunnel_operations(
+                        tunnel,
+                        changed_leafs,
+                        delete
+                    )
+                )
+
+            return operations
+            
         if object_type == "tunnel":
             return self._build_tunnel_operations(
                 parent_dict,
@@ -1590,8 +1783,262 @@ class Agent:
                 parent_dict,
                 e
             )
+    # =====================================================================================
+    # Rebuild runtime dataplane state from the persistent YANG datastore (Used after Clixon startup transaction-id 0.YANG datastore is the desired-state source of truth.)
+    # =====================================================================================
+    def reconcile_startup_state(self): 
+        with self.startup_reconcile_lock:
+    
+            if self.startup_reconciled:
+                self.startup_reconcile_event.set()
+                return
+    
+            logging.info(
+                "Starting startup reconciliation from YANG datastore"
+            )
+    
+            try:
+                # ==========================================================
+                # 0. Check Forwarder health FIRST
+                # ==========================================================
+                if not self._wait_for_forwarder_healthy():
+                    logging.error(
+                        "Startup reconciliation stopped because "
+                        "Forwarder is unhealthy"
+                    )
+                
+                    self._send_cpe_health_to_controller()
+                    return
+                
+                # ==========================================================
+                # Wait until Clixon RESTCONF is ready
+                # ==========================================================
+                
+                if not self.wait_for_restconf(timeout_sec=60):
+                    logging.error(
+                        "Startup reconciliation stopped because "
+                        "RESTCONF is not ready"
+                    )
+                    return
+                
+                # ==========================================================
+                # 1. Read persistent YANG configuration
+                # ==========================================================
+                
+                current_config = self.config_reader.get_intended_config()
+    
+                self.current_config_cache = current_config
+    
+                # Runtime caches must be rebuilt from the new live dataplane.
+                self.wan_last_ipv4.clear()
+                self.wan_nat_types.clear()
+                self.flow_id_fwmarks.clear()
+    
+                # =================================================================
+                # PHASE 1 - Restore physical interface / LAN configuration
+                # =================================================================
+                interface_operations = []
+    
+                interfaces = current_config.get("interfaces", {})
+    
+                # -------------------------
+                # Restore WAN links
+                # -------------------------
+                underlay = interfaces.get("underlay", {})
+    
+                wan_links = self._as_list(
+                    underlay.get("wan-link", [])
+                )
+    
+                for wan in wan_links:
+                    if not isinstance(wan, dict):
+                        continue
+    
+                    interface_operations.extend(
+                        self._build_wan_link_operations(
+                            wan,
+                            ["*"],
+                            delete=False
+                        )
+                    )
+    
+                # -------------------------
+                # Restore LAN links
+                # -------------------------
+                lan = interfaces.get("lan", {})
+    
+                lan_links = self._as_list(
+                    lan.get("lan-link", [])
+                )
+    
+                for lan_link in lan_links:
+                    if not isinstance(lan_link, dict):
+                        continue
+    
+                    interface_operations.extend(
+                        self._build_lan_link_operations(
+                            lan_link,
+                            ["*"],
+                            delete=False
+                        )
+                    )
+    
+                if interface_operations:
+                    logging.info( "Startup reconciliation: restoring %s WAN/LAN operations",
+                        len(interface_operations)
+                    )
+    
+                    self._send_forwarder_transaction(
+                        operations=interface_operations,
+                        validate_only=False,
+                        timeout=60
+                    )
+    
+                # =================================================================
+                # PHASE 2 - Restore traffic classification / fwmarks
+                # =================================================================
+                traffic_operations = []
+    
+                traffic_classes = self._as_list(
+                    current_config.get("traffic", {}).get("class", [])
+                )
+    
+                for traffic_class in traffic_classes:
+                    if not isinstance(traffic_class, dict):
+                        continue
+    
+                    traffic_operations.extend(
+                        self._build_traffic_class_operations(
+                            traffic_class,
+                            ["*"],
+                            delete=False
+                        )
+                    )
+    
+                if traffic_operations:
+                    logging.info(
+                        "Startup reconciliation: restoring %s traffic-class operations",
+                        len(traffic_operations)
+                    )
+    
+                    self._send_forwarder_transaction(
+                        operations=traffic_operations,
+                        validate_only=False,
+                        timeout=60
+                    )
+    
+                # The Forwarder transaction result should already return fwmarks.
+                # This GET is an additional recovery/synchronization check.
+                self._sync_fwmarks_from_forwarder()
+    
+                # =================================================================
+                # PHASE 3 - Restore WireGuard tunnels + peers
+                # =================================================================
+                tunnel_operations = []
+    
+                tunnels = self._as_list(
+                    current_config.get("overlay", {}).get("tunnel", [])
+                )
+    
+                for tunnel in tunnels:
+                    if not isinstance(tunnel, dict):
+                        continue
+    
+                    tunnel_operations.extend(
+                        self._build_tunnel_operations(
+                            tunnel,
+                            ["*"],
+                            delete=False
+                        )
+                    )
+    
+                if tunnel_operations:
+                    logging.info(
+                        "Startup reconciliation: restoring %s WireGuard operations",
+                        len(tunnel_operations)
+                    )
+    
+                    self._send_forwarder_transaction(
+                        operations=tunnel_operations,
+                        validate_only=False,
+                        timeout=60
+                    )
+
+                # =================================================================
+                # PHASE 4 - Restore firewall rules
+                # =================================================================
+                firewall_operations = []
+                
+                firewall_rules = self._as_list(
+                    current_config.get("firewall", {}).get("rule", [])
+                )
+                
+                for firewall_rule in firewall_rules:
+                
+                    if not isinstance(firewall_rule, dict):
+                        continue
+                
+                    firewall_operations.extend(
+                        self._build_firewall_rule_operations(
+                            firewall_rule,
+                            ["*"],
+                            delete=False
+                        )
+                    )
+                
+                if firewall_operations:
+                
+                    logging.info(
+                        "Startup reconciliation: restoring %s firewall operations",
+                        len(firewall_operations)
+                    )
+                
+                    self._send_forwarder_transaction(
+                        operations=firewall_operations,
+                        validate_only=False,
+                        timeout=60
+                    )
 
     
+                # =================================================================
+                # PHASE 5 - Restart monitoring derived from YANG configuration
+                # =================================================================
+                for traffic_class in traffic_classes:
+                    if isinstance(traffic_class, dict):
+                        self._start_monitoring_for_object(
+                            "class",
+                            traffic_class
+                        )
+    
+                for tunnel in tunnels:
+                    if (
+                        isinstance(tunnel, dict)
+                        and tunnel.get("resolved-peer")
+                    ):
+                        self._start_monitoring_for_object(
+                            "tunnel",
+                            tunnel
+                        )
+    
+                # =================================================================
+                # PHASE 6 - Rediscover live WAN state
+                # =================================================================
+                self.discover_nat_for_all_wans()
+    
+                # Announce only once after the basic dataplane has been rebuilt.
+                self._announce_to_controller()
+    
+                self.startup_reconciled = True
+    
+                logging.info("Startup reconciliation completed successfully" )
+    
+            except Exception as e:
+                logging.exception("Startup reconciliation failed: %s", e)
+    
+            finally:
+                # Do not leave the normal runtime loop blocked forever.
+                self.startup_reconcile_event.set()
+                
     # =====================================================================================
     # Clixon callback handling
     # =====================================================================================
@@ -1602,13 +2049,33 @@ class Agent:
         transaction_id = root.findtext("transaction-id")
         validate_only = phase == "validate"                                                       #Clixon sends validate first and commit after successful validation. If Clixon sends phase = "validate"→ validate_only = True
 
-        if transaction_id == "0":                                                                 #transaction 0 is startup data, not a real user config change
-            logging.info("Ignoring Clixon startup transaction 0")
-            return {
-                "status": "ok",
-                "phase": phase,
-                "ignored": True,
-                "reason": "startup transaction"}
+        if transaction_id == "0":
+        
+            logging.info("Received Clixon startup transaction 0 phase=%s", phase)
+        
+            if phase == "validate":                                                              # Validation must never modify the dataplane.
+                return {
+                    "status": "ok",
+                    "phase": phase,
+                    "startup": True,
+                    "message": "Startup reconciliation will run after commit"
+                }
+        
+            if phase == "commit":
+                if not self.startup_reconcile_started:
+                    self.startup_reconcile_started = True
+                    threading.Thread(target=self.reconcile_startup_state,  daemon=True ).start()
+        
+                return {
+                    "status": "ok",
+                    "phase": phase,
+                    "startup": True,
+                    "message": "Startup reconciliation triggered"
+                }
+        
+            raise ValueError(
+                f"Unsupported Clixon startup phase: {phase}"
+            )
 
         if phase not in ["validate", "commit"]:
             raise ValueError(f"Unsupported Clixon phase: {phase}")
@@ -1619,6 +2086,10 @@ class Agent:
 
         monitoring_start_candidates = []                                                          # class/tunnel objects that need monitoring start/update after commit
         monitoring_stop_candidates = []                                                           # class/tunnel objects that need monitoring stop after commit
+        
+        deleted_tunnel_candidates = []                                                            # fully deleted tunnels whose local key material must be removed after commit
+        
+        controller_reconcile_needed = False                                                       # trigger controller peer resolution after tunnel create/change
 
         changed = root.find("changed")                                                            #contains leaf changes sent by the Clixon diff callback
         
@@ -1629,15 +2100,18 @@ class Agent:
                 if new_node is None:
                     continue
 
-                changed_leaf = new_node.findtext("node-name")                                   #name of the YANG leaf that changed
-                parent_data = new_node.find("parent-data")                                      #contains the full parent object of the changed leaf
-                parent_xml = self._first_child(parent_data)                                     #extracts the real changed object from parent_data
+                changed_leaf = new_node.findtext("node-name")                              # raw YANG node that actually changed
 
+                parent_xml = self._callback_object_xml(                                    # Prefer normalized object-data from the new callback.
+                    new_node,
+                    fallback="parent"                                                      # With the old callback, fall back to the existing parent-data behavior.
+                )
+                
                 if parent_xml is None:
                     continue
-
-                object_type = self._local_name(parent_xml.tag)                                 #example: wan link, tunnel, rule, class
-                parent_dict = self._xml_to_dict(parent_xml)                                    #converted parent object used by the operation builders
+                
+                object_type = self._local_name(parent_xml.tag)                             # class/tunnel/wan-link/lan-link/rule/steering
+                parent_dict = self._xml_to_dict(parent_xml)                               # complete semantic object
 
                 object_name = (
                     parent_dict.get("name")
@@ -1670,30 +2144,128 @@ class Agent:
                     changed_leafs,
                     delete=False))
             
-            if object_type in ["class", "tunnel"]:                                     
-                monitoring_start_candidates.append({                                         # if traffic class or tunnel changed, schedule monitoring start/update
-                    "object_type": object_type,                                        
-                    "parent_dict": parent_dict     })                                             # object data
-             
-
+            if object_type == "class":
+                monitoring_start_candidates.append({
+                    "object_type": "class",
+                    "parent_dict": parent_dict
+                })
+            
+            elif object_type == "tunnel":
+            
+                peer_relationship_changed = any(
+                    leaf in changed_leafs
+                    for leaf in [
+                        "remote-cpe-id",
+                        "remote-tunnel-name",
+                        "bind-wan-link"
+                    ]
+                )
+            
+                if peer_relationship_changed:
+                    controller_reconcile_needed = True
+            
+                # Start/update tunnel monitoring only if peer information is already valid.
+                # If peer relationship changed, wait for Controller to PATCH resolved-peer.
+                if (
+                    parent_dict.get("resolved-peer")
+                    and not peer_relationship_changed
+                ):
+                    monitoring_start_candidates.append({
+                        "object_type": "tunnel",
+                        "parent_dict": parent_dict
+                    })                                         
+            
         added = root.find("added")                                                      # contains newly added datastore objects
         
         if added is not None:
             for node in added.findall("node"):
             
-                data = node.find("data")                                                # contains the actual object added by Clixon
-                added_xml = self._first_child(data)                                     # extract actual added object
-            
-                operations.extend(self._build_operations_from_parent_xml(added_xml,["*"], delete=False))
-            
+                added_xml = self._callback_object_xml(                                # Prefer the normalized semantic object from the callback.
+                    node,
+                    fallback="data"                                                    # If the callback is still the old version, retain the previous behavior and read the raw <data> object.
+                )
+                
                 if added_xml is not None:
                     object_type = self._local_name(added_xml.tag)
+
+                    if object_type == "traffic":                                        # Clixon may report a newly created traffic class using the parent <traffic> container. 
+                        class_xml = self._first_child(added_xml)
+                    
+                        if (
+                            class_xml is not None
+                            and self._local_name(class_xml.tag) == "class"              # Normalize it to the actual <class>.
+                        ):
+                            added_xml = class_xml
+                            object_type = "class"
+
+                    if object_type == "policy":
+                        steering_xml = self._first_child(added_xml)
+                    
+                        if (
+                            steering_xml is not None
+                            and self._local_name(steering_xml.tag) == "steering"
+                        ):
+                            added_xml = steering_xml
+                            object_type = "steering"
+                
+                    if object_type == "resolved-peer":
+                        parent_data = node.find("parent-data")
+                        tunnel_xml = self._first_child(parent_data)
+                
+                        if (tunnel_xml is not None
+                            and self._local_name(tunnel_xml.tag) == "tunnel"
+                        ):
+                            tunnel_dict = self._xml_to_dict(tunnel_xml)
+                
+                            operations.extend(
+                                self._build_tunnel_operations(
+                                    tunnel_dict,
+                                    ["resolved-peer"],
+                                    delete=False
+                                )
+                            )
+                            monitoring_start_candidates.append({
+                                "object_type": "tunnel",
+                                "parent_dict": tunnel_dict
+                            })
+
+                    else:
+                        operations.extend(
+                            self._build_operations_from_parent_xml(
+                                added_xml,
+                                ["*"],
+                                delete=False
+                            )
+                        )
                     parent_dict = self._xml_to_dict(added_xml)
-            
-                    if object_type in ["class", "tunnel"]:
+
+                    if object_type == "class":
                         monitoring_start_candidates.append({
-                            "object_type": object_type,
-                            "parent_dict": parent_dict })
+                            "object_type": "class",
+                            "parent_dict": parent_dict
+                        })
+                    
+                    elif object_type == "tunnel":
+                        if not parent_dict.get("resolved-peer"):
+                            controller_reconcile_needed = True
+                        else:
+                            monitoring_start_candidates.append({
+                                "object_type": "tunnel",
+                                "parent_dict": parent_dict
+                            })
+                    
+                    elif object_type == "overlay":
+                        for tunnel in self._as_list(parent_dict.get("tunnel")):
+                            if not isinstance(tunnel, dict):
+                                continue
+                    
+                            if not tunnel.get("resolved-peer"):
+                                controller_reconcile_needed = True
+                            else:
+                                monitoring_start_candidates.append({
+                                    "object_type": "tunnel",
+                                    "parent_dict": tunnel
+                                })
 
                     if object_type == "wan-link":
                         nat_detection_candidates.append(parent_dict)                                # direct WAN-link was added
@@ -1709,44 +2281,199 @@ class Agent:
                         for wan_link in self._as_list(underlay.get("wan-link")):                     # get WAN links nested under interfaces
                             if isinstance(wan_link, dict):
                                 nat_detection_candidates.append(wan_link)                             # schedule NAT discovery for each WAN
-                            
-        deleted = root.find("deleted")                                                      # contains deleted datastore objects (normally delete=False, but when clixon reports delete->delete=True)
+
+        deleted = root.find("deleted")                                                               # contains deleted datastore objects
         
         if deleted is not None:
+        
+            tunnel_delete_groups = {}                                                                # groups deleted tunnel child nodes by tunnel name
+            other_deleted_nodes = []                                                                 # stores deleted objects that are not tunnel children
+        
             for node in deleted.findall("node"):
-                data = node.find("data")
-                deleted_xml = self._first_child(data)
+        
+                data = node.find("data")                                                              # actual deleted child/object
+                deleted_xml = self._first_child(data)                                                 # extract deleted XML object
+        
+                if deleted_xml is None:
+                    continue                                                                          # skip invalid callback entries
+        
+                parent_data = node.find("parent-data")                                                # contains complete old parent object
+                parent_xml = self._first_child(parent_data)                                           # extract old parent object
+        
+                if (
+                    parent_xml is not None
+                    and self._local_name(parent_xml.tag) == "tunnel"
+                ):                                                                                    # Clixon reported a deleted child belonging to a tunnel
+        
+                    tunnel_dict = self._xml_to_dict(parent_xml)                                       # full old tunnel configuration
+                    tunnel_id = tunnel_dict.get("name")                                               # tunnel list key
+        
+                    if tunnel_id:
+        
+                        if tunnel_id not in tunnel_delete_groups:
+                            tunnel_delete_groups[tunnel_id] = {
+                                "parent_dict": tunnel_dict,
+                                "deleted_leafs": set(),
+                                "nodes": []
+                            }                                                                         # create one group per tunnel
+        
+                        tunnel_delete_groups[tunnel_id]["deleted_leafs"].add(
+                            self._local_name(deleted_xml.tag)
+                        )                                                                             # remember which tunnel child was deleted
+        
+                        tunnel_delete_groups[tunnel_id]["nodes"].append(node)                         # keep original node for partial-delete fallback
+        
+                        continue                                                                      # tunnel child already grouped, do not process again
+        
+                other_deleted_nodes.append(node)                                                      # normal deletion unrelated to tunnel grouping
+        
+        
+            for tunnel_id, item in tunnel_delete_groups.items():
+        
+                parent_dict = item["parent_dict"]                                                     # full old tunnel configuration
+                deleted_leafs = item["deleted_leafs"]                                                 # all deleted tunnel children in this transaction
+        
+                expected_leafs = {
+                    key
+                    for key in parent_dict.keys()
+                    if key != "name"
+                }                                                                                     # all old tunnel children except the list key
+        
+                if expected_leafs and expected_leafs.issubset(deleted_leafs):                         # all old tunnel children disappeared together
+        
+                    logging.info("Detected complete tunnel deletion: %s",tunnel_id)                   # complete list-entry deletion detected
+        
+                    operations.extend(
+                        self._build_operations_from_object("tunnel", parent_dict, ["*"], delete=True))       # generate Forwarder DELETE for route and WireGuard tunnel
+        
+                    monitoring_stop_candidates.append({
+                        "object_type": "tunnel",
+                        "parent_dict": parent_dict
+                    })                                                                                # stop tunnel monitoring after successful commit
 
-                operations.extend(self._build_operations_from_parent_xml(deleted_xml, ["*"], delete=True))
+                    deleted_tunnel_candidates.append(tunnel_id)                                       # defer local key deletion until commit succeeds
+        
+                else:
+                    deleted_allowed_prefixes = []
+                    other_tunnel_deleted_nodes = []
                 
-                if deleted_xml is not None:                                                # if deleted object exists
-                    object_type = self._local_name(deleted_xml.tag)                    
-                    parent_dict = self._xml_to_dict(deleted_xml)                           # convert XML to dict (Clixon sends the changed object as XML)
+                    for node in item["nodes"]:
+                
+                        data = node.find("data")
+                        deleted_xml = self._first_child(data)
+                
+                        if deleted_xml is None:
+                            continue
+                
+                        deleted_type = self._local_name(deleted_xml.tag)
+                
+                        if deleted_type == "allowed-prefix":
+                
+                            deleted_prefix = (deleted_xml.text or "").strip()
+                
+                            if deleted_prefix:
+                                deleted_allowed_prefixes.append(deleted_prefix)
+                
+                        else:
+                            other_tunnel_deleted_nodes.append(node)
+                
+                
+                    # -------------------------------------------------------------
+                    # Partial deletion of WireGuard allowed-prefix
+                    # -------------------------------------------------------------
+                    if deleted_allowed_prefixes:
+                
+                        resolved_peer = parent_dict.get("resolved-peer") or {}
+                
+                        old_prefixes = self._as_list(
+                            resolved_peer.get("allowed-prefix")
+                        )
+                
+                        remaining_prefixes = [
+                            prefix
+                            for prefix in old_prefixes
+                            if prefix not in deleted_allowed_prefixes
+                        ]
+                
+                        resolved_peer["allowed-prefix"] = remaining_prefixes
+                        parent_dict["resolved-peer"] = resolved_peer
 
-                    if object_type in ["class", "tunnel"]:                                 # only stop monitoring for classes and tunnels
-                        monitoring_stop_candidates.append({                                # schedule monitoring stop
-                            "object_type": object_type,                                
-                            "parent_dict": parent_dict})
+                        operations.append(self._operation("DELETE",
+                                f"/api/v1/routes/static/{tunnel_id}-peer-routes"                        # Delete old route-set first so stale kernel routes are removed
+                            )
+                        )
+                
+                        operations.extend(
+                            self._build_tunnel_operations(
+                                parent_dict,
+                                ["allowed-prefix"],
+                                delete=False
+                            )
+                        )
+                
+                
+                    # Preserve existing behaviour for other partial tunnel deletions
+                    for node in other_tunnel_deleted_nodes:
+                
+                        data = node.find("data")
+                        deleted_xml = self._first_child(data)
+                
+                        operations.extend(
+                            self._build_operations_from_parent_xml(
+                                deleted_xml,
+                                ["*"],
+                                delete=True
+                            )
+                        )                                                                          
+                        
+        
+            for node in other_deleted_nodes:
+                data = node.find("data")                                                              # actual deleted object
+                deleted_xml = self._first_child(data)                                                 # extract deleted object XML
 
-        if not operations:                                                                  #if this config change has no forwarder mapping, return OK without sending anything
-            return {
-                "status": "ok",
-                "phase": phase,
-                "message": "No forwarder operation generated",
-                "operations": []}
+                if (
+                    deleted_xml is not None
+                    and self._local_name(deleted_xml.tag) == "traffic"                                # Clixon may wrap a deleted traffic class in <traffic>.
+                ):
+                    class_xml = self._first_child(deleted_xml)
+                
+                    if (
+                        class_xml is not None
+                        and self._local_name(class_xml.tag) == "class"
+                    ):
+                        deleted_xml = class_xml
+        
+                operations.extend(
+                    self._build_operations_from_parent_xml(
+                        deleted_xml,
+                        ["*"],
+                        delete=True
+                    )
+                )                                                                                     # process non-tunnel deletions normally
+        
+                if deleted_xml is not None:
+        
+                    object_type = self._local_name(deleted_xml.tag)                                   # determine deleted object type
+                    parent_dict = self._xml_to_dict(deleted_xml)                                      # convert deleted object into Python dict
+        
+                    if object_type in ["class", "tunnel"]:
+        
+                        monitoring_stop_candidates.append({
+                            "object_type": object_type,
+                            "parent_dict": parent_dict
+                        })                                                                            # stop monitoring after successful commit
+                
+        forwarder_result = None
 
-        forwarder_result = self._send_forwarder_transaction(
-            operations=operations,
-            validate_only=validate_only)
+        if operations:
+            forwarder_result = self._send_forwarder_transaction(
+                operations=operations,
+                validate_only=validate_only)                                                           # send transaction only when Forwarder operations exist
 
         if phase == "commit":
             for wan in nat_detection_candidates:
         
-                threading.Thread(
-                    target=self._wait_for_wan_ready,
-                    args=(wan,),
-                    daemon=True
-                ).start()                                                                       # wait for DHCP without blocking Clixon commit
+                threading.Thread(target=self._wait_for_wan_ready, args=(wan,), daemon=True).start()                                                                       # wait for DHCP without blocking Clixon commit
 
             for item in monitoring_start_candidates:                                        # start/update monitoring only after real commit
                 self._start_monitoring_for_object(                              
@@ -1760,6 +2487,22 @@ class Agent:
                     item["parent_dict"]                                                     # object data
                 )
 
+            for tunnel_id in deleted_tunnel_candidates:
+                self._delete_wireguard_tunnel_keys(tunnel_id)                                # delete private/public key files and runtime key cache after committed tunnel deletion
+        
+                overlay = self.current_config_cache.get("overlay", {})
+                tunnels = self._as_list(overlay.get("tunnel", []))
+        
+                overlay["tunnel"] = [
+                    tunnel
+                    for tunnel in tunnels
+                    if not isinstance(tunnel, dict)
+                    or tunnel.get("name") != tunnel_id
+                ]                                                                             # prevent operational-state builder from republishing deleted tunnel from stale cache
+         
+            if controller_reconcile_needed:
+                    logging.info("Tunnel configuration requires controller peer reconciliation")
+                    threading.Thread(target=self._announce_to_controller, daemon=True).start()       # notify controller without delaying Clixon commit
         return {
             "status": "ok",
             "phase": phase,
@@ -2033,9 +2776,28 @@ class Agent:
         current_config = self.config_reader.get_intended_config()                           # read intended config from YANG datastore
         self.current_config_cache = current_config
 
-        self.check_wan_ip_changes()                                                         # detect changed WAN endpoint and notify controller
-        self._update_cpe_state()
+        # ---------------------------------------------------------
+        # Check Forwarder health FIRST
+        # ---------------------------------------------------------
+        forwarder_healthy = self._update_cpe_state()
     
+        # CPE heartbeat to Controller is independent of Forwarder tasks
+        self._send_cpe_health_to_controller()
+    
+        if not forwarder_healthy:
+    
+            logging.warning(
+                "Skipping Forwarder-dependent runtime tasks "
+                "because Forwarder is unhealthy"
+            )
+    
+            return {
+                "status": "degraded",
+                "reason": "forwarder unhealthy"
+            }
+
+        self.check_wan_ip_changes()                                                         # detect changed WAN endpoint and notify controller
+  
         if not hasattr(self, "metric_reader"):
             logging.warning("metric_reader not configured")
             return {"status": "skipped", "reason": "metric_reader not configured"}
