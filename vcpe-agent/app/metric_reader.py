@@ -70,6 +70,9 @@ class MetricReader:
         now = datetime.now(timezone.utc)
     
         fake_flow_metrics = {
+            # ---------------------------------------------------------
+            # Flow 257 -> test-xr
+            # ---------------------------------------------------------
             ("257", "UPL1"): {
                 "latency_ms": 20,
                 "jitter_ms": 3,
@@ -82,50 +85,63 @@ class MetricReader:
                 "loss_percent": 0.5,
                 "available_bandwidth_kbps": 30000
             },
-            ("257", "UPL3"): {
-                "latency_ms": 90,
-                "jitter_ms": 25,
-                "loss_percent": 3.0,
-                "available_bandwidth_kbps": 5000
+        
+            # ---------------------------------------------------------
+            # Flow 259 -> internet-web
+            # ---------------------------------------------------------
+            ("259", "UPL1"): {
+                "latency_ms": 18,
+                "jitter_ms": 2,
+                "loss_percent": 0.1,
+                "available_bandwidth_kbps": 60000
             },
-    
-            ("1002", "UPL1"): {
+            ("259", "UPL2"): {
+                "latency_ms": 28,
+                "jitter_ms": 4,
+                "loss_percent": 0.2,
+                "available_bandwidth_kbps": 45000
+            }
+        }
+        
+        
+        fake_tunnel_metrics = {
+            # ---------------------------------------------------------
+            # Primary tunnel - best path
+            # ---------------------------------------------------------
+            "wg-upl2-upl2": {
                 "latency_ms": 15,
                 "jitter_ms": 2,
                 "loss_percent": 0.1,
-                "available_bandwidth_kbps": 40000
+                "available_bandwidth_kbps": 70000
             },
-            ("1002", "UPL2"): {
-                "latency_ms": 60,
-                "jitter_ms": 10,
-                "loss_percent": 0.8,
-                "available_bandwidth_kbps": 20000
-            },
-            ("1002", "UPL3"): {
-                "latency_ms": 110,
-                "jitter_ms": 30,
-                "loss_percent": 4.0,
-                "available_bandwidth_kbps": 6000
-            }
-        }
-    
-        fake_tunnel_metrics = {
-            "wg01": {
-                "latency_ms": 25,
+        
+            # ---------------------------------------------------------
+            # Secondary tunnel 1
+            # ---------------------------------------------------------
+            "wg-upl1-upl2": {
+                "latency_ms": 30,
                 "jitter_ms": 4,
                 "loss_percent": 0.2,
-                "available_bandwidth_kbps": 60000
+                "available_bandwidth_kbps": 50000
             },
-            "wg02": {
-                "latency_ms": 120,
-                "jitter_ms": 25,
-                "loss_percent": 3.0,
-                "available_bandwidth_kbps": 8000
-            },
-            "wg03": {
-                "latency_ms": 40,
-                "jitter_ms": 8,
+        
+            # ---------------------------------------------------------
+            # Secondary tunnel 2
+            # ---------------------------------------------------------
+            "wg-upl2-upl1": {
+                "latency_ms": 45,
+                "jitter_ms": 7,
                 "loss_percent": 0.5,
+                "available_bandwidth_kbps": 35000
+            },
+        
+            # ---------------------------------------------------------
+            # Secondary tunnel 3 - worst but still usable
+            # ---------------------------------------------------------
+            "wg-upl1-upl1": {
+                "latency_ms": 65,
+                "jitter_ms": 10,
+                "loss_percent": 0.8,
                 "available_bandwidth_kbps": 25000
             }
         }
