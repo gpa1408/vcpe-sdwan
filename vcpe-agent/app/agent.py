@@ -77,6 +77,43 @@ class Agent:
         children = list(element)                                                      # gets all direct child XML nodes inside this element
         return children[0] if children else None                                      # returns the real object inside wrappers like parent data
 
+    def _callback_object_xml(self, wrapper, fallback="data"):
+        """
+        Return the normalized semantic configuration object sent by the
+        Clixon callback plugin.
+    
+        New callback format:
+            <object-data>
+                <class|tunnel|wan-link|lan-link|rule|steering>...</...>
+            </object-data>
+    
+        Backward compatibility:
+            If object-data is not present, preserve the previous Agent
+            behavior by falling back either to <data> or <parent-data>.
+        """
+    
+        if wrapper is None:
+            return None
+    
+        # -------------------------------------------------------------
+        # Preferred new callback contract
+        # -------------------------------------------------------------
+        object_data = wrapper.find("object-data")
+        object_xml = self._first_child(object_data)
+    
+        if object_xml is not None:
+            return object_xml
+    
+        # -------------------------------------------------------------
+        # Backward compatibility with the old callback
+        # -------------------------------------------------------------
+        if fallback == "parent":
+            parent_data = wrapper.find("parent-data")
+            return self._first_child(parent_data)
+    
+        data = wrapper.find("data")
+        return self._first_child(data)
+
     def _bool_value(self, value):                                                     # converts YANG/Clixon boolean text into real Python boolean without adding Python defaults
         if value is None:
             return None
@@ -2062,15 +2099,18 @@ class Agent:
                 if new_node is None:
                     continue
 
-                changed_leaf = new_node.findtext("node-name")                                   #name of the YANG leaf that changed
-                parent_data = new_node.find("parent-data")                                      #contains the full parent object of the changed leaf
-                parent_xml = self._first_child(parent_data)                                     #extracts the real changed object from parent_data
+                changed_leaf = new_node.findtext("node-name")                              # raw YANG node that actually changed
 
+                parent_xml = self._callback_object_xml(                                    # Prefer normalized object-data from the new callback.
+                    new_node,
+                    fallback="parent"                                                      # With the old callback, fall back to the existing parent-data behavior.
+                )
+                
                 if parent_xml is None:
                     continue
-
-                object_type = self._local_name(parent_xml.tag)                                 #example: wan link, tunnel, rule, class
-                parent_dict = self._xml_to_dict(parent_xml)                                    #converted parent object used by the operation builders
+                
+                object_type = self._local_name(parent_xml.tag)                             # class/tunnel/wan-link/lan-link/rule/steering
+                parent_dict = self._xml_to_dict(parent_xml)                               # complete semantic object
 
                 object_name = (
                     parent_dict.get("name")
@@ -2139,9 +2179,11 @@ class Agent:
         if added is not None:
             for node in added.findall("node"):
             
-                data = node.find("data")                                                # contains the actual object added by Clixon
-                added_xml = self._first_child(data)                                     # extract actual added object
-            
+                added_xml = self._callback_object_xml(                                # Prefer the normalized semantic object from the callback.
+                    node,
+                    fallback="data"                                                    # If the callback is still the old version, retain the previous behavior and read the raw <data> object.
+                )
+                
                 if added_xml is not None:
                     object_type = self._local_name(added_xml.tag)
 
