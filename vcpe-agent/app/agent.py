@@ -2238,7 +2238,13 @@ class Agent:
                         )
                     parent_dict = self._xml_to_dict(added_xml)
 
-                    if object_type == "tunnel":
+                    if object_type == "class":
+                        monitoring_start_candidates.append({
+                            "object_type": "class",
+                            "parent_dict": parent_dict
+                        })
+                    
+                    elif object_type == "tunnel":
                         if not parent_dict.get("resolved-peer"):
                             controller_reconcile_needed = True
                         else:
