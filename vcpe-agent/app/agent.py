@@ -2352,21 +2352,74 @@ class Agent:
 
                     deleted_tunnel_candidates.append(tunnel_id)                                       # defer local key deletion until commit succeeds
         
-                else:
-        
+               else:
+                    deleted_allowed_prefixes = []
+                    other_deleted_nodes = []
+                
                     for node in item["nodes"]:
-        
-                        data = node.find("data")                                                      # retrieve individual deleted child
-                        deleted_xml = self._first_child(data)                                         # extract deleted child XML
-        
+                
+                        data = node.find("data")
+                        deleted_xml = self._first_child(data)
+                
+                        if deleted_xml is None:
+                            continue
+                
+                        deleted_type = self._local_name(deleted_xml.tag)
+                
+                        if deleted_type == "allowed-prefix":
+                
+                            deleted_prefix = (deleted_xml.text or "").strip()
+                
+                            if deleted_prefix:
+                                deleted_allowed_prefixes.append(deleted_prefix)
+                
+                        else:
+                            other_deleted_nodes.append(node)
+                
+                
+                    # -------------------------------------------------------------
+                    # Partial deletion of WireGuard allowed-prefix
+                    # -------------------------------------------------------------
+                    if deleted_allowed_prefixes:
+                
+                        resolved_peer = parent_dict.get("resolved-peer") or {}
+                
+                        old_prefixes = self._as_list(
+                            resolved_peer.get("allowed-prefix")
+                        )
+                
+                        remaining_prefixes = [
+                            prefix
+                            for prefix in old_prefixes
+                            if prefix not in deleted_allowed_prefixes
+                        ]
+                
+                        resolved_peer["allowed-prefix"] = remaining_prefixes
+                        parent_dict["resolved-peer"] = resolved_peer
+                
+                        operations.extend(
+                            self._build_tunnel_operations(
+                                parent_dict,
+                                ["resolved-peer"],
+                                delete=False
+                            )
+                        )
+                
+                
+                    # Preserve existing behaviour for other partial tunnel deletions
+                    for node in other_deleted_nodes:
+                
+                        data = node.find("data")
+                        deleted_xml = self._first_child(data)
+                
                         operations.extend(
                             self._build_operations_from_parent_xml(
                                 deleted_xml,
                                 ["*"],
                                 delete=True
                             )
-                        )                                                                             # preserve normal processing for partial tunnel-child deletion
-        
+                        )                                                                          
+                        
         
             for node in other_deleted_nodes:
                 data = node.find("data")                                                              # actual deleted object
