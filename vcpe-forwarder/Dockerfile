@@ -15,7 +15,8 @@ RUN apk add --no-cache \
     curl \
     ca-certificates \
     dnsmasq \
-    bash
+    bash \
+    tini
 
 WORKDIR /app
 
@@ -26,5 +27,7 @@ COPY forwarder /app/forwarder
 COPY forwarder-udhcpc-script /usr/local/sbin/forwarder-udhcpc-script
 RUN chmod 0755 /usr/local/sbin/forwarder-udhcpc-script \
     && mkdir -p /app/var/lib/forwarder /run/forwarder/dhcp
+
+ENTRYPOINT ["/sbin/tini", "--"]
 
 CMD ["uvicorn", "forwarder.app:create_app", "--factory", "--host", "0.0.0.0", "--port", "9090"]

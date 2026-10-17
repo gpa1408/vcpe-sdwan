@@ -167,24 +167,12 @@ class Renderer:
                         commands.append(f"ip route del {host}/32 || true")
 
         for server_id in sorted(set(previous.dhcp_servers) - set(current.dhcp_servers)):
-           # commands.extend(
-            #    [
-            #        f"systemctl stop dnsmasq@{server_id} || true",
-            #        f"systemctl disable dnsmasq@{server_id} || true",
-            #        f"rm -f etc/forwarder/dnsmasq/{server_id}.conf",
-            #    ]
-            #)
+            # Stop only the dnsmasq instance owned by this DHCP service and remove
+            # its active configuration. Tini (PID 1 in the container) reaps the
+            # daemon after it exits, preventing zombie accumulation.
+            commands.append(self._dnsmasq_stop_command(server_id))
+            commands.append(f"rm -f /app/etc/forwarder/dnsmasq/{server_id}.conf")
 
-            pid_path = f"/run/dnsmasq-{server_id}.pid"                                         #NEW LINE PAMODI
-            commands.extend(                                                                  #NEW LINE PAMODI
-                [ (                                                                        #NEW LINE PAMODI
-                        f"if [ -f {pid_path} ]; then "                                        #NEW LINE PAMODI
-                        f"kill $(cat {pid_path}) >/dev/null 2>&1 || true; "                  #NEW LINE PAMODI
-                        f"rm -f {pid_path}; "                                                #NEW LINE PAMODI
-                        f"fi"                                                                #NEW LINE PAMODI
-                    ),                                                                        #NEW LINE PAMODI
-                    f"rm -f /app/etc/forwarder/dnsmasq/{server_id}.conf",  ] )                 #NEW LINE PAMODI
-              
 
         for ap_id in sorted(set(previous.access_points) - set(current.access_points)):
             old_ap = previous.access_points[ap_id]
@@ -346,19 +334,144 @@ class Renderer:
                     )
                 )
 
-        for route_set_id, route_set in sorted(current.static_route_sets.items()):
-            for route in route_set.routes:
-                if route.out_interface and not self._interface_is_usable_for_routing(route.out_interface, current):
-                    continue
+        # Reconcile Forwarder-managed static routes against the previous state.
+        # This removes prefixes that disappeared from desired state and renders
+        # WireGuard peer routes sharing the same destination as one multipath route
+        # instead of letting repeated `ip route replace` calls overwrite each other.
+        commands.extend(self._render_static_routes(previous, current))
+        return commands
 
-                route_cmd = ["ip route replace", route.destination_cidr]
+    @staticmethod
+    def _route_identity(route) -> tuple[str, str | None, str | None, int | None]:
+        return (
+            route.destination_cidr,
+            route.next_hop_ip,
+            route.out_interface,
+            route.metric,
+        )
+
+    def _collect_peer_route_groups(self, state: ForwarderState) -> dict[tuple[str, int | None], list]:
+        groups: dict[tuple[str, int | None], dict[tuple[str | None, str | None], object]] = {}
+
+        for route_set_id, route_set in state.static_route_sets.items():
+            if not route_set_id.endswith("-peer-routes"):
+                continue
+
+            for route in route_set.routes:
+                key = (route.destination_cidr, route.metric)
+                identity = (route.next_hop_ip, route.out_interface)
+                groups.setdefault(key, {})[identity] = route
+
+        return {key: list(routes.values()) for key, routes in groups.items()}
+
+    def _render_static_routes(self, previous: ForwarderState, current: ForwarderState) -> list[str]:
+        commands: list[str] = []
+
+        # --- Ordinary static routes -------------------------------------------------
+        # Peer route sets are handled separately below because several WireGuard
+        # tunnels may legitimately advertise the same remote LAN prefix.
+        previous_normal: dict[tuple[str, str | None, str | None, int | None], object] = {}
+        current_normal: dict[tuple[str, str | None, str | None, int | None], object] = {}
+
+        for route_set_id, route_set in previous.static_route_sets.items():
+            if route_set_id.endswith("-peer-routes"):
+                continue
+            for route in route_set.routes:
+                previous_normal[self._route_identity(route)] = route
+
+        for route_set_id, route_set in current.static_route_sets.items():
+            if route_set_id.endswith("-peer-routes"):
+                continue
+            for route in route_set.routes:
+                current_normal[self._route_identity(route)] = route
+
+        # Remove routes that existed before but no longer exist in desired state.
+        for key in sorted(previous_normal.keys() - current_normal.keys(), key=str):
+            route = previous_normal[key]
+            route_cmd = ["ip route del", route.destination_cidr]
+            if route.next_hop_ip:
+                route_cmd.append(f"via {route.next_hop_ip}")
+            if route.out_interface:
+                route_cmd.append(f"dev {route.out_interface}")
+            if route.metric is not None:
+                route_cmd.append(f"metric {route.metric}")
+            commands.append(" ".join(route_cmd) + " >/dev/null 2>&1 || true")
+
+        # Apply the current ordinary static routes.
+        for key in sorted(current_normal, key=str):
+            route = current_normal[key]
+            if route.out_interface and not self._interface_is_usable_for_routing(route.out_interface, current):
+                continue
+
+            route_cmd = ["ip route replace", route.destination_cidr]
+            if route.next_hop_ip:
+                route_cmd.append(f"via {route.next_hop_ip}")
+            if route.out_interface:
+                route_cmd.append(f"dev {route.out_interface}")
+            if route.metric is not None:
+                route_cmd.append(f"metric {route.metric}")
+            commands.append(" ".join(route_cmd))
+
+        # --- WireGuard peer routes --------------------------------------------------
+        previous_peer_groups = self._collect_peer_route_groups(previous)
+        current_peer_groups = self._collect_peer_route_groups(current)
+
+        # If a prefix disappeared completely (for example after deleting an
+        # allowed-prefix), remove the old kernel route.
+        for destination, metric in sorted(
+            previous_peer_groups.keys() - current_peer_groups.keys(),
+            key=lambda item: (item[0], -1 if item[1] is None else item[1]),
+        ):
+            route_cmd = ["ip route del", destination]
+            if metric is not None:
+                route_cmd.append(f"metric {metric}")
+            commands.append(" ".join(route_cmd) + " >/dev/null 2>&1 || true")
+
+        # Rebuild every current peer prefix from the complete desired state.
+        # One tunnel -> normal route. Several tunnels -> one Linux multipath route.
+        for destination, metric in sorted(
+            current_peer_groups,
+            key=lambda item: (item[0], -1 if item[1] is None else item[1]),
+        ):
+            usable_routes = [
+                route
+                for route in current_peer_groups[(destination, metric)]
+                if not route.out_interface
+                or self._interface_is_usable_for_routing(route.out_interface, current)
+            ]
+
+            if not usable_routes:
+                route_cmd = ["ip route del", destination]
+                if metric is not None:
+                    route_cmd.append(f"metric {metric}")
+                commands.append(" ".join(route_cmd) + " >/dev/null 2>&1 || true")
+                continue
+
+            route_cmd = ["ip route replace", destination]
+            if metric is not None:
+                route_cmd.append(f"metric {metric}")
+
+            if len(usable_routes) == 1:
+                route = usable_routes[0]
                 if route.next_hop_ip:
                     route_cmd.append(f"via {route.next_hop_ip}")
                 if route.out_interface:
                     route_cmd.append(f"dev {route.out_interface}")
-                if route.metric is not None:
-                    route_cmd.append(f"metric {route.metric}")
-                commands.append(" ".join(route_cmd))
+            else:
+                for route in sorted(
+                    usable_routes,
+                    key=lambda item: (item.out_interface or "", item.next_hop_ip or ""),
+                ):
+                    nexthop = ["nexthop"]
+                    if route.next_hop_ip:
+                        nexthop.append(f"via {route.next_hop_ip}")
+                    if route.out_interface:
+                        nexthop.append(f"dev {route.out_interface}")
+                    nexthop.append("weight 1")
+                    route_cmd.append(" ".join(nexthop))
+
+            commands.append(" ".join(route_cmd))
+
         return commands
 
     def _render_nftables(self, current: ForwarderState, revision: str, plan: RenderPlan) -> list[str]:
@@ -377,59 +490,83 @@ class Renderer:
             f"nft -f {nft_abs_path}",
         ]
 
+    def _dnsmasq_stop_command(self, server_id: str) -> str:
+        pid_path = f"/run/dnsmasq-{server_id}.pid"
+        active_conf_path = f"/app/etc/forwarder/dnsmasq/{server_id}.conf"
+
+        # Stop the process referenced by the pidfile, wait briefly for it to exit,
+        # then fall back to matching the service-specific command line. With tini as
+        # PID 1, exited/re-parented dnsmasq processes are reaped instead of becoming
+        # permanent zombies.
+        return (
+            f"PID=''; "
+            f"if [ -s {pid_path} ]; then PID=$(cat {pid_path}); fi; "
+            f'if [ -n "$PID" ] && kill -0 "$PID" >/dev/null 2>&1; then '
+            f'kill "$PID" >/dev/null 2>&1 || true; '
+            f"for i in $(seq 1 30); do "
+            f'kill -0 "$PID" >/dev/null 2>&1 || break; '
+            f"sleep 0.1; "
+            f"done; "
+            f'if kill -0 "$PID" >/dev/null 2>&1; then '
+            f'kill -9 "$PID" >/dev/null 2>&1 || true; '
+            f"fi; "
+            f"fi; "
+            f"rm -f {pid_path}; "
+            f"pkill -f '^dnsmasq .*--conf-file={active_conf_path}([[:space:]]|$)' "
+            f">/dev/null 2>&1 || true"
+        )
+
     def _render_services(self, previous: ForwarderState, current: ForwarderState, revision: str, plan: RenderPlan) -> list[str]:
         commands: list[str] = []
 
-        #for server_id, server in sorted(current.dhcp_servers.items()):
-        #    conf_path = f"var/lib/forwarder/rendered/{revision}/dnsmasq/{server_id}.conf"
-         #   plan.files[conf_path] = self._dnsmasq_config(server)
-        #    commands.append(f"install -m 0644 {conf_path} etc/forwarder/dnsmasq/{server_id}.conf")
-         #   if server.enabled:
-           #     commands.append(f"systemctl restart dnsmasq@{server_id}")
-            #    commands.append(f"systemctl enable dnsmasq@{server_id}")
-            #else:
-             #   commands.append(f"systemctl stop dnsmasq@{server_id} || true")
-             #   commands.append(f"systemctl disable dnsmasq@{server_id} || true")
-
-        for server_id, server in sorted(current.dhcp_servers.items()):                                   #NEW LINE PAMODI
+        for server_id, server in sorted(current.dhcp_servers.items()):
             conf_path = f"var/lib/forwarder/rendered/{revision}/dnsmasq/{server_id}.conf"
             active_conf_path = f"/app/etc/forwarder/dnsmasq/{server_id}.conf"
             pid_path = f"/run/dnsmasq-{server_id}.pid"
-        
+
+            # Keep a rendered copy for this revision even when no restart is needed.
             plan.files[conf_path] = self._dnsmasq_config(server)
 
+            previous_server = previous.dhcp_servers.get(server_id)
+            if (
+                previous_server is not None
+                and previous_server.model_dump(mode="json") == server.model_dump(mode="json")
+            ):
+                # Route/WireGuard/steering-only transactions must not bounce DHCP/DNS.
+                continue
+
             commands.append("mkdir -p /app/etc/forwarder/dnsmasq")
-        
             commands.append(f"install -m 0644 /app/{conf_path} {active_conf_path}")
-        
+
+            # Validate the new configuration before touching the currently running
+            # dnsmasq instance. If validation fails, the old service stays alive.
+            commands.append(f"dnsmasq --test --conf-file={active_conf_path}")
+            commands.append(self._dnsmasq_stop_command(server_id))
+
             if server.enabled:
                 commands.append(
-                    f"if [ -f {pid_path} ]; then "
-                    f"kill $(cat {pid_path}) >/dev/null 2>&1 || true; "
-                    f"rm -f {pid_path}; "
-                    f"else "
-                    f"pkill -f '^dnsmasq --conf-file={active_conf_path}' >/dev/null 2>&1 || true; "
-                    f"fi" )
-            
-                commands.append("sleep 1")
-            
-                commands.append(
-                    f"dnsmasq "
-                    f"--conf-file={active_conf_path} "
-                    f"--pid-file={pid_path}")
-            
-            else:
-                commands.append(
-                    f"if [ -f {pid_path} ]; then "
-                    f"kill $(cat {pid_path}) >/dev/null 2>&1 || true; "
-                    f"rm -f {pid_path}; "
-                    f"else "
-                    f"pkill -f '^dnsmasq --conf-file={active_conf_path}' >/dev/null 2>&1 || true; "
-                    f"fi"  )                                                                      #NEW LINE PAMODI
-    
+                    f"dnsmasq --conf-file={active_conf_path} --pid-file={pid_path}; "
+                    f"for i in $(seq 1 30); do "
+                    f"if [ -s {pid_path} ] && kill -0 $(cat {pid_path}) >/dev/null 2>&1; then "
+                    f"exit 0; "
+                    f"fi; "
+                    f"sleep 0.1; "
+                    f"done; "
+                    f"echo 'dnsmasq failed to stay running for {server_id}' >&2; "
+                    f"exit 1"
+                )
+
         for ap_id, ap in sorted(current.access_points.items()):
             conf_path = f"var/lib/forwarder/rendered/{revision}/hostapd/{ap_id}.conf"
             plan.files[conf_path] = self._hostapd_config(ap)
+
+            previous_ap = previous.access_points.get(ap_id)
+            if (
+                previous_ap is not None
+                and previous_ap.model_dump(mode="json") == ap.model_dump(mode="json")
+            ):
+                continue
+
             if ap.enabled:
                 commands.append(f"ip link set dev {ap.radio_interface} up")
                 commands.append(f"install -m 0600 {conf_path} etc/forwarder/hostapd/{ap_id}.conf")

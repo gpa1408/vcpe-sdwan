@@ -19,7 +19,15 @@ class CommandRunner:
         for phase, commands in phases.items():
             entries: list[dict[str, Any]] = []
             for command in commands:
-                entries.append(self.run(command))
+                result = self.run(command)
+                entries.append(result)
+
+                # Fail fast. Once an apply command fails, do not continue modifying
+                # unrelated parts of the dataplane in later commands/phases.
+                if result.get("returncode", 0) != 0:
+                    journal[phase] = entries
+                    return journal
+
             journal[phase] = entries
         return journal
 
