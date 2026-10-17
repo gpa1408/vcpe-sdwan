@@ -2397,6 +2397,11 @@ class Agent:
                 
                         resolved_peer["allowed-prefix"] = remaining_prefixes
                         parent_dict["resolved-peer"] = resolved_peer
+
+                        operations.append(self._operation("DELETE",
+                                f"/api/v1/routes/static/{tunnel_id}-peer-routes"                        # Delete old route-set first so stale kernel routes are removed
+                            )
+                        )
                 
                         operations.extend(
                             self._build_tunnel_operations(
