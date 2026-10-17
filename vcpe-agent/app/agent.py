@@ -2354,7 +2354,7 @@ class Agent:
         
                else:
                     deleted_allowed_prefixes = []
-                    other_deleted_nodes = []
+                    other_tunnel_deleted_nodes = []
                 
                     for node in item["nodes"]:
                 
@@ -2374,7 +2374,7 @@ class Agent:
                                 deleted_allowed_prefixes.append(deleted_prefix)
                 
                         else:
-                            other_deleted_nodes.append(node)
+                            other_tunnel_deleted_nodes.append(node)
                 
                 
                     # -------------------------------------------------------------
@@ -2407,7 +2407,7 @@ class Agent:
                 
                 
                     # Preserve existing behaviour for other partial tunnel deletions
-                    for node in other_deleted_nodes:
+                    for node in other_tunnel_deleted_nodes:
                 
                         data = node.find("data")
                         deleted_xml = self._first_child(data)
