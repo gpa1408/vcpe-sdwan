@@ -2352,7 +2352,7 @@ class Agent:
 
                     deleted_tunnel_candidates.append(tunnel_id)                                       # defer local key deletion until commit succeeds
         
-               else:
+                else:
                     deleted_allowed_prefixes = []
                     other_tunnel_deleted_nodes = []
                 
