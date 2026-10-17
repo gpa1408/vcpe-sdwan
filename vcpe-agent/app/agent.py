@@ -1356,7 +1356,8 @@ class Agent:
             tunnel_payload["description"] = f"WireGuard tunnel {tunnel_id}"
     
             if "listen_port" in tunnel_payload and "local_addresses" in tunnel_payload:
-                operations.append(self._operation("PUT", f"/api/v1/tunnels/wireguard/{tunnel_id}", tunnel_payload))
+                if any(leaf in changed_leafs for leaf in tunnel_change_leafs):
+                    operations.append(self._operation("PUT",  f"/api/v1/tunnels/wireguard/{tunnel_id}", tunnel_payload,))
     
         peer_change_leafs = ["peer-address", "peer-port", "peer-public-key", "allowed-prefix", "keepalive-seconds", "resolved-peer", "admin-enabled"]
         if self._has_change(changed_leafs, *peer_change_leafs):
