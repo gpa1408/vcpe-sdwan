@@ -233,48 +233,6 @@ find_agent_object(cxobj *x)
     return NULL;
 }
 
-    /*
-     * First walk upward. This handles normal leaf/container changes.
-     */
-    current = x;
-
-    while (current != NULL) {
-
-        name = xml_name(current);
-
-        if (is_agent_object(name))
-            return current;
-
-        current = xml_parent(current);
-    }
-
-    /*
-     * Some ADD/DELETE diffs may expose a wrapper instead of the
-     * actual list entry. Handle the wrapper forms already observed
-     * in this project.
-     */
-    name = xml_name(x);
-
-    if (name != NULL && strcmp(name, "traffic") == 0) {
-
-        child = find_single_direct_child(x, "class");
-
-        if (child != NULL)
-            return child;
-    }
-
-    if (name != NULL && strcmp(name, "policy") == 0) {
-
-        child = find_single_direct_child(x, "steering");
-
-        if (child != NULL)
-            return child;
-    }
-
-    return NULL;
-}
-
-
 /*
  * Append normalized semantic-object metadata without modifying the
  * original diff information.
