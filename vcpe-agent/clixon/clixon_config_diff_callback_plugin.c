@@ -183,14 +183,55 @@ find_agent_object(cxobj *x)
     const char *name = NULL;
 
     if (x == NULL)
-
-        if (name != NULL && strcmp(name, "firewall") == 0) {
-            child = find_single_direct_child(x, "rule");
-        
-            if (child != NULL)
-                return child;
-        }
         return NULL;
+
+    /*
+     * First walk upward. This handles normal leaf/container changes.
+     */
+    current = x;
+
+    while (current != NULL) {
+
+        name = xml_name(current);
+
+        if (is_agent_object(name))
+            return current;
+
+        current = xml_parent(current);
+    }
+
+    /*
+     * Some ADD/DELETE diffs may expose a wrapper instead of the
+     * actual list entry.
+     */
+    name = xml_name(x);
+
+    if (name != NULL && strcmp(name, "traffic") == 0) {
+
+        child = find_single_direct_child(x, "class");
+
+        if (child != NULL)
+            return child;
+    }
+
+    if (name != NULL && strcmp(name, "policy") == 0) {
+
+        child = find_single_direct_child(x, "steering");
+
+        if (child != NULL)
+            return child;
+    }
+
+    if (name != NULL && strcmp(name, "firewall") == 0) {
+
+        child = find_single_direct_child(x, "rule");
+
+        if (child != NULL)
+            return child;
+    }
+
+    return NULL;
+}
 
     /*
      * First walk upward. This handles normal leaf/container changes.
