@@ -183,6 +183,13 @@ find_agent_object(cxobj *x)
     const char *name = NULL;
 
     if (x == NULL)
+
+        if (name != NULL && strcmp(name, "firewall") == 0) {
+            child = find_single_direct_child(x, "rule");
+        
+            if (child != NULL)
+                return child;
+        }
         return NULL;
 
     /*
