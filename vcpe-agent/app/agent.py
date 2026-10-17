@@ -2400,7 +2400,7 @@ class Agent:
                         operations.extend(
                             self._build_tunnel_operations(
                                 parent_dict,
-                                ["resolved-peer"],
+                                ["allowed-prefix"],
                                 delete=False
                             )
                         )
