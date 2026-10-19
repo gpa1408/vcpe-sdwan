@@ -1024,8 +1024,12 @@ class Agent:
             self.startup_reconcile_started = True
             self.reconcile_startup_state()
     
-        logging.info( "Startup recovery finished; starting runtime steering loop")
-    
+        if not self.startup_reconciled:
+            logging.error("Startup reconciliation did not complete successfully; " "runtime steering loop will not start")
+            return
+            
+        logging.info("Startup recovery finished; starting runtime steering loop")
+
         self.run_forever(interval_sec=interval_sec)
         
     # =====================================================================================
@@ -1180,10 +1184,14 @@ class Agent:
 
         logging.info("Forwarder response body: %s", response.text)                         # log actual response body for debugging
         
-        if response.text:                                                                  # if forwarder returned JSON response body
-            result = response.json()                                                       # parse response JSON
-            self._process_forwarder_transaction_result(result)                             # extract fwmark values returned by forwarder
-            return result                                                                  # return forwarder response to caller
+        if response.text:
+            result = response.json()
+            if result.get("status") == "rejected":
+                logging.error("Forwarder rejected transaction: %s", response.text)
+        
+                raise RuntimeError(f"Forwarder rejected transaction: {result}" )
+            self._process_forwarder_transaction_result(result)
+            return result
         
         return {"status": "ok"}                                                            # return simple OK if response body is empty
 
@@ -1341,23 +1349,29 @@ class Agent:
             return operations
     
         tunnel_change_leafs = ["name", "local-port", "local-address", "mtu", "admin-enabled"]
+        
         if self._has_change(changed_leafs, *tunnel_change_leafs):
             local_port = parent_dict.get("local-port")
             local_address = parent_dict.get("local-address")
             mtu = parent_dict.get("mtu")
+        
             private_path = self.generated_tunnel_keys.get(tunnel_id, {}).get("private-path")
-    
+        
             tunnel_payload = {}
+        
             if private_path:
                 tunnel_payload["private_key_ref"] = f"file://{private_path}"
-            self._add_if_not_none(tunnel_payload, "listen_port", int(local_port) if local_port else None)
-            tunnel_payload["local_addresses"] = [local_address] if local_address else []
+        
+            self._add_if_not_none(tunnel_payload,"listen_port", int(local_port) if local_port else None)
+        
+            tunnel_payload["local_addresses"] = ([local_address] if local_address else [])
+        
             self._add_if_not_none(tunnel_payload, "mtu", int(mtu) if mtu else None)
-            tunnel_payload["description"] = f"WireGuard tunnel {tunnel_id}"
-    
-            if "listen_port" in tunnel_payload and "local_addresses" in tunnel_payload:
-                if any(leaf in changed_leafs for leaf in tunnel_change_leafs):
-                    operations.append(self._operation("PUT",  f"/api/v1/tunnels/wireguard/{tunnel_id}", tunnel_payload,))
+        
+            tunnel_payload["description"] = (f"WireGuard tunnel {tunnel_id}" )
+        
+            if ("listen_port" in tunnel_payload and tunnel_payload["local_addresses"]):
+                operations.append(self._operation("PUT", f"/api/v1/tunnels/wireguard/{tunnel_id}", tunnel_payload))
     
         peer_change_leafs = ["peer-address", "peer-port", "peer-public-key", "allowed-prefix", "keepalive-seconds", "resolved-peer", "admin-enabled"]
         if self._has_change(changed_leafs, *peer_change_leafs):
