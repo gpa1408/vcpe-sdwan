@@ -1,238 +1,167 @@
-# vcpe-monitoring
+# vcpe-monitoring — MEF 105-aligned / OpenTelemetry revision
 
-Implementation starter for the SD-WAN CPE monitoring module defined by Pamodi's API and Metric Reader contracts.
+This folder is the monitoring container for the vCPE SD-WAN thesis prototype.
+It preserves the original Agent-facing diagnostic contract while adding a
+separate one-way performance model aligned with MEF 105 and an OpenTelemetry
+export path.
 
-## Source contract implemented
+## Important scope statement
 
-Required endpoints:
+This implementation is **aligned with MEF 105**. It does **not** claim formal
+MEF 105 compliance. No real TWAMP implementation is bundled and RTT is never
+converted into one-way delay.
 
-- `POST /api/v1/monitoring/flows`
-- `DELETE /api/v1/monitoring/flows/{flow_id}/{wan_link}`
-- `POST /api/v1/monitoring/tunnels`
-- `DELETE /api/v1/monitoring/tunnels/{tunnel_id}`
+## One container only
 
-Underlay jobs are keyed by `(flow_id, wan_link)`. Overlay jobs are keyed by `tunnel_id`.
+`vcpe-monitoring` runs three cooperating processes inside the same container:
 
-InfluxDB measurements:
+1. `app.supervisor` (PID 1)
+2. OpenTelemetry Collector Contrib (loopback `127.0.0.1:4318` / `:13133`)
+3. FastAPI/Uvicorn (`:9100`)
+
+No extra Docker Compose service is required for the Collector.
+
+## Legacy contract preserved
+
+The original measurements remain unchanged for the Agent MetricReader:
 
 - `sdwan_flow_metrics`
-  - tags: `flow_id`, `wan_link`
-  - fields: `latency_ms`, `jitter_ms`, `loss_percent`, `available_bandwidth_kbps`
 - `sdwan_tunnel_metrics`
-  - tag: `tunnel_id`
-  - same four fields
 
-## Important implementation decision: host networking
+Fields remain:
 
-The monitoring process must see the real host WAN/WireGuard interfaces to bind probes to `ens6`, `ens7`, `wg01`, etc. Therefore the recommended first Raspberry/Linux implementation uses:
+- `latency_ms` (RTT-derived diagnostic metric)
+- `jitter_ms` (diagnostic RTT variation)
+- `loss_percent`
+- `available_bandwidth_kbps`
 
-```yaml
-network_mode: host
-cap_add:
-  - NET_RAW
+The OpenTelemetry/MEF path is separate from these legacy measurements.
+
+## MEF 105-aligned one-way model
+
+New endpoint:
+
+`POST /api/v1/monitoring/mef105/samples`
+
+It accepts real one-way packet observations with UTC TX/RX timestamps, groups
+them into UTC calculation intervals and computes:
+
+- `one_way_mean_packet_delay_ms`
+- `one_way_mean_inter_packet_delay_variation_ms`
+- `one_way_packet_loss_ratio`
+
+These are exported through the local OpenTelemetry SDK to the local Collector,
+which writes them to the existing InfluxDB instance.
+
+### Example input
+
+```json
+{
+  "entity": {
+    "entity_id": "wg-upl1-upl2",
+    "entity_type": "tvc",
+    "source_cpe": "cpe-1",
+    "destination_cpe": "cpe-2",
+    "source_uplink": "UPL1",
+    "destination_uplink": "UPL2",
+    "direction": "cpe1-to-cpe2"
+  },
+  "calculation_interval_sec": 5,
+  "samples": [
+    {
+      "sequence_number": 1,
+      "tx_timestamp_utc": "2026-10-18T00:00:00.000Z",
+      "rx_timestamp_utc": "2026-10-18T00:00:00.020Z",
+      "received": true
+    },
+    {
+      "sequence_number": 2,
+      "tx_timestamp_utc": "2026-10-18T00:00:00.100Z",
+      "rx_timestamp_utc": "2026-10-18T00:00:00.126Z",
+      "received": true
+    },
+    {
+      "sequence_number": 3,
+      "tx_timestamp_utc": "2026-10-18T00:00:00.200Z",
+      "received": false
+    }
+  ]
+}
 ```
 
-No `NET_ADMIN` is required because monitoring measures paths; it does not program the dataplane.
+The timestamps must come from an actual one-way measurement mechanism. The
+container does not fabricate them from ping.
 
-With host networking, InfluxDB is reached through the port published on the host:
+## Threshold Crossing Alerts (TCA)
 
-```text
-INFLUX_URL=http://127.0.0.1:8086
-```
+Thresholds are configured with:
 
-If the Agent remains on Docker's `mgmt` bridge, it reaches monitoring through:
+- `MEF105_DELAY_THRESHOLD_MS`
+- `MEF105_DELAY_VARIATION_THRESHOLD_MS`
+- `MEF105_LOSS_RATIO_THRESHOLD`
 
-```text
-http://host.docker.internal:9100
-```
+Only transitions are emitted (`SET` / `CLEAR`). Recent events are available at:
 
-with `host.docker.internal:host-gateway` in `extra_hosts`.
+`GET /api/v1/monitoring/mef105/tcas`
 
-## Logical WAN -> Linux interface mapping
+The original Agent does **not** forward these TCAs to the Controller. That is an
+explicit future control-plane integration item.
 
-Pamodi's payload sends `wan_link="UPL1"` but not the Linux interface name. Configure:
+## OpenTelemetry
+
+The Python SDK exports OTLP/HTTP to `127.0.0.1:4318/v1/metrics`. The Collector
+is bundled in the same image and exports to the existing InfluxDB using the
+`INFLUX_*` environment variables.
+
+## Build and start
+
+From the repository root:
 
 ```bash
-WAN_LINK_MAP_JSON='{"UPL1":"ens6","UPL2":"ens7","UPL3":"ens8"}'
+docker compose build vcpe-monitoring
+docker compose up -d vcpe-monitoring
 ```
 
-The service refuses to start the flow job if the resolved Linux interface is not visible. This prevents silently measuring the wrong WAN.
-
-## Probe behavior
-
-### ping
-
-Runs with the selected interface:
+Then inspect:
 
 ```bash
-ping -I ens6 ...
-```
-
-Produces:
-
-- `latency_ms`: mean RTT of received replies
-- `loss_percent`: packet loss
-- `jitter_ms`: mean absolute difference between consecutive RTT samples
-
-Pamodi defines `jitter_ms` but not the formula, so the formula above is an implementation decision and should be kept documented.
-
-### iperf3
-
-Requires a reachable `iperf3 -s` server at the destination. The client binds to the selected source IP and, by default, to the selected device using `--bind-dev`.
-
-Produces `available_bandwidth_kbps`.
-
-### TWAMP
-
-Pamodi includes `twamp` for overlay tunnel monitoring but does not define a TWAMP executable, reflector, command syntax, or output format. This implementation therefore includes an adapter hook rather than pretending a specific TWAMP implementation exists.
-
-Until the team selects a TWAMP tool, ping/iperf3 still run and the job exposes a TWAMP configuration warning.
-
-## Build
-
-```bash
-cd vcpe-monitoring
-docker build -t vcpe-monitoring .
-```
-
-## First run
-
-```bash
-docker run --rm \
-  --name vcpe-monitoring \
-  --network host \
-  --cap-add NET_RAW \
-  -e WAN_LINK_MAP_JSON='{"UPL1":"ens6","UPL2":"ens7"}' \
-  -e INFLUX_URL=http://127.0.0.1:8086 \
-  -e INFLUX_ORG=thesis \
-  -e INFLUX_BUCKET=vcpe \
-  -e INFLUX_TOKEN="$INFLUX_TOKEN" \
-  vcpe-monitoring
-```
-
-## Health
-
-```bash
+docker logs vcpe-monitoring --tail 100
 curl -s http://127.0.0.1:9100/health | python3 -m json.tool
 ```
 
-## Start underlay monitoring
+The expected processes are supervisor + otelcol-contrib + uvicorn.
 
-First validate path selection with ping only:
+## Agent integration (minimal changes only)
 
-```bash
-curl -s -X POST http://127.0.0.1:9100/api/v1/monitoring/flows \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "flow_id":"257",
-    "wan_link":"UPL1",
-    "destination_ip":"1.1.1.1",
-    "probe_tools":["ping"],
-    "interval_sec":10
-  }' | python3 -m json.tool
-```
+Do not expand Agent logic for TCA forwarding yet. The intended minimal Agent
+configuration is:
 
-Then add `iperf3` only when a real iperf3 server is reachable on the target path.
+- `MonitoringManager(dry_run=False)`
+- Build API URL from `MONITORING_URL.rstrip('/') + '/api/v1'`
+- `METRIC_READER_MODE=influxdb`
+- configurable freshness / max age; start with `30` seconds
 
-## Same flow on a second WAN
-
-```bash
-curl -s -X POST http://127.0.0.1:9100/api/v1/monitoring/flows \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "flow_id":"257",
-    "wan_link":"UPL2",
-    "destination_ip":"1.1.1.1",
-    "probe_tools":["ping"],
-    "interval_sec":10
-  }'
-```
-
-Both jobs coexist because their identities are `257:UPL1` and `257:UPL2`.
-
-## Debug jobs
-
-Extra debug endpoint, not part of Pamodi's four-endpoint contract:
-
-```bash
-curl -s http://127.0.0.1:9100/api/v1/monitoring/jobs | python3 -m json.tool
-```
-
-## Stop only UPL1
-
-```bash
-curl -s -X DELETE \
-  http://127.0.0.1:9100/api/v1/monitoring/flows/257/UPL1
-```
-
-The UPL2 job continues.
-
-## Tunnel monitoring
-
-Once `wg01` exists:
-
-```bash
-curl -s -X POST http://127.0.0.1:9100/api/v1/monitoring/tunnels \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "tunnel_id":"wg01",
-    "destination_ip":"10.200.0.2",
-    "probe_tools":["ping","iperf3","twamp"],
-    "interval_sec":600
-  }'
-```
-
-## InfluxDB contract
-
-Flow points must use:
+Recommended Compose environment for Agent:
 
 ```text
-measurement = sdwan_flow_metrics
-tags:
-  flow_id
-  wan_link
-fields:
-  latency_ms
-  jitter_ms
-  loss_percent
-  available_bandwidth_kbps
+MONITORING_URL=http://host.docker.internal:9100
+METRIC_READER_MODE=influxdb
+METRIC_READER_MAX_AGE_SEC=30
 ```
 
-Tunnel points must use:
+## First validation on the CPE
 
-```text
-measurement = sdwan_tunnel_metrics
-tag:
-  tunnel_id
-same four fields
-```
+1. `docker compose build vcpe-monitoring`
+2. `docker compose up -d vcpe-monitoring`
+3. Verify `/health` returns `healthy`.
+4. Start a legacy ping-only tunnel/flow job and confirm the original InfluxDB
+   series/fields still appear.
+5. POST a controlled one-way sample batch to `/api/v1/monitoring/mef105/samples`.
+6. Confirm the OTel Collector receives/exports the MEF metrics to InfluxDB.
+7. Force a threshold crossing and verify one `SET`, then recovery and one `CLEAR`.
+8. Finally enable Agent `dry_run=False` and validate MetricReader freshness.
 
-Example query:
+## Known limitation
 
-```flux
-from(bucket: "vcpe")
-  |> range(start: -5m)
-  |> filter(fn: (r) => r._measurement == "sdwan_flow_metrics")
-  |> filter(fn: (r) => r.flow_id == "257")
-  |> filter(fn: (r) => r.wan_link == "UPL1")
-```
-
-## Acceptance checklist
-
-1. `/health` is healthy.
-2. `POST flows` creates one job keyed by `(flow_id, wan_link)`.
-3. Repeating the same POST updates/replaces the same job, not a duplicate.
-4. Same flow ID can run UPL1 and UPL2 simultaneously.
-5. UPL1 probes really leave via WAN1 and UPL2 probes via WAN2.
-6. InfluxDB contains `sdwan_flow_metrics` with exact tags/fields.
-7. DELETE UPL1 does not stop UPL2.
-8. Tunnel POST binds to `wgXX`.
-9. InfluxDB contains `sdwan_tunnel_metrics`.
-10. Agent Metric Reader consumes a fresh point for the correct flow/WAN or tunnel.
-
-## Known open items
-
-- Select the actual TWAMP client/reflector.
-- Decide where iperf3 responders will run.
-- Confirm the Agent's flow-specific metric read path. Pamodi's schema is keyed by `flow_id + wan_link`; a reader that queries only by WAN name loses traffic-class identity.
-- Decide whether the Agent recreates jobs after monitoring-container restart or jobs must be persisted.
+A real TWAMP client/reflector and clock synchronization strategy are still
+required before one-way measurements can be produced natively by the vCPE.

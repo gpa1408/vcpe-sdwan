@@ -1,3 +1,5 @@
+FROM otel/opentelemetry-collector-contrib:0.140.1 AS otel
+
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -14,14 +16,18 @@ RUN apt-get update \
 
 WORKDIR /app
 
+COPY --from=otel /otelcol-contrib /usr/local/bin/otelcol-contrib
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
 COPY app ./app
+COPY otel /etc/otel
 
 EXPOSE 9100
 
-HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 \
-    CMD curl -fsS http://127.0.0.1:9100/health || exit 1
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:${API_PORT:-9100}/health >/dev/null \
+        && curl -fsS http://127.0.0.1:13133/ >/dev/null \
+        || exit 1
 
-CMD ["sh", "-c", "uvicorn app.main:app --host ${API_BIND:-0.0.0.0} --port ${API_PORT:-9100}"]
+CMD ["python", "-m", "app.supervisor"]

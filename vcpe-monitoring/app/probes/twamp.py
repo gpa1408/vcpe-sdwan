@@ -22,23 +22,17 @@ async def run_twamp(
     command_template: str,
     timeout_sec: float,
 ) -> TwampResult:
-    """
-    Adapter for a team-selected TWAMP client.
+    """Adapter hook for a future, team-selected TWAMP implementation.
 
-    Pamodi defines "twamp" as a probe tool but does not define the executable,
-    reflector, command syntax, or output format. This adapter is disabled until
-    TWAMP_COMMAND_TEMPLATE is configured.
-
-    The configured command must print JSON with any of:
-      latency_ms, jitter_ms, loss_percent
+    No TWAMP client/reflector is bundled and no synthetic one-way values are
+    invented. If configured, this hook may still feed the legacy diagnostic
+    fields used by the original Agent, but its output is never promoted to the
+    MEF 105 one-way model automatically.
     """
     if not command_template.strip():
-        return TwampResult(error="TWAMP adapter is not configured")
+        return TwampResult(error="TWAMP adapter is not configured; no real TWAMP implementation is bundled")
 
-    rendered = command_template.format(
-        destination=destination_ip,
-        interface=interface,
-    )
+    rendered = command_template.format(destination=destination_ip, interface=interface)
     args = shlex.split(rendered)
 
     try:

@@ -25,12 +25,11 @@ services:
     environment:
       - API_BIND=0.0.0.0
       - API_PORT=9090
-      - STATE_DIR=/state
       - FORWARDER_EXECUTE=1
       - 'WAN_LINK_MAP_JSON={"UPL1":"ens5","UPL2":"ens6"}'
 
     volumes:
-      - vcpe_forwarder_state:/state
+      - vcpe_forwarder_state:/app/var/lib/forwarder
       - ./shared-keys:/var/lib/sdwan-cpe/keys:ro
 
 
@@ -122,8 +121,9 @@ services:
     restart: unless-stopped
 
     # IMPORTANT:
-    # Monitoring must see the real Linux WAN/WireGuard interfaces
-    # in order to bind probes to ens6, ens7, wg01, etc.
+    # Monitoring must see the real Linux WAN/WireGuard interfaces.
+    # API + OpenTelemetry SDK + OpenTelemetry Collector run inside
+    # this same container; no extra Compose service is added.
     network_mode: host
 
     cap_add:
@@ -140,48 +140,52 @@ services:
 
       # --------------------------------------------------------
       # Logical SD-WAN WAN name -> Linux interface
-      #
-      # Adapt this mapping to the real interfaces on the host /
-      # Raspberry Pi.
-      #
-      # Current GNS3 example:
-      # UPL1 -> ens6
-      # UPL2 -> ens7
       # --------------------------------------------------------
       - 'WAN_LINK_MAP_JSON={"UPL1":"ens6","UPL2":"ens7"}'
 
       # --------------------------------------------------------
-      # InfluxDB
-      #
-      # Monitoring is using network_mode: host.
-      # It therefore reaches the host-published InfluxDB port.
+      # Existing InfluxDB
+      # Monitoring uses host networking, so use host-published 8086.
       # --------------------------------------------------------
       - INFLUX_URL=http://127.0.0.1:8086
       - INFLUX_BUCKET=vcpe
       - INFLUX_ORG=thesis
       - INFLUX_TOKEN=${INFLUX_TOKEN}
+      - INFLUX_ENABLED=true
 
       # --------------------------------------------------------
-      # Ping probe configuration
+      # Legacy diagnostic probes used by the original Agent
       # --------------------------------------------------------
       - PING_COUNT=4
       - PING_PROCESS_TIMEOUT_SEC=10
-
-      # --------------------------------------------------------
-      # iperf3 probe configuration
-      # --------------------------------------------------------
       - IPERF_PORT=5201
       - IPERF_DURATION_SEC=3
       - IPERF_PROCESS_TIMEOUT_SEC=12
       - IPERF_BIND_DEVICE=true
 
-      # --------------------------------------------------------
-      # TWAMP
-      #
-      # Leave empty until the TWAMP client/reflector
-      # implementation is selected.
-      # --------------------------------------------------------
+      # No real TWAMP client/reflector is bundled yet.
       - TWAMP_COMMAND_TEMPLATE=
+
+      # --------------------------------------------------------
+      # MEF 105-aligned model (not a formal compliance claim)
+      # --------------------------------------------------------
+      - MEF105_CALCULATION_INTERVAL_SEC=5
+      - MEF105_DELAY_THRESHOLD_MS=80
+      - MEF105_DELAY_VARIATION_THRESHOLD_MS=20
+      - MEF105_LOSS_RATIO_THRESHOLD=0.02
+      - MEF105_RECENT_TCA_LIMIT=200
+
+      # --------------------------------------------------------
+      # OpenTelemetry SDK -> embedded Collector (loopback only)
+      # --------------------------------------------------------
+      - OTEL_ENABLED=true
+      - OTEL_SERVICE_NAME=vcpe-monitoring
+      - OTEL_METRICS_ENDPOINT=http://127.0.0.1:4318/v1/metrics
+      - OTEL_EXPORT_INTERVAL_MS=5000
+      - OTEL_COLLECTOR_HEALTH_URL=http://127.0.0.1:13133/
+      - OTEL_COLLECTOR_CONFIG=/etc/otel/collector-config.yaml
+      - OTEL_COLLECTOR_BINARY=/usr/local/bin/otelcol-contrib
+      - OTEL_COLLECTOR_START_TIMEOUT_SEC=20
 
     depends_on:
       - influxdb

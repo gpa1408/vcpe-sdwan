@@ -3,3 +3,10 @@ __pycache__/
 .pytest_cache/
 .venv/
 tests/
+.git/
+.github/
+.vscode/
+.idea/
+README.md
+requirements-dev.txt
+scripts/
