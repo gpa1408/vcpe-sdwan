@@ -141,7 +141,7 @@ services:
       # --------------------------------------------------------
       # Logical SD-WAN WAN name -> Linux interface
       # --------------------------------------------------------
-      - 'WAN_LINK_MAP_JSON={"UPL1":"ens6","UPL2":"ens7"}'
+      - 'WAN_LINK_MAP_JSON={"UPL1":"ens5","UPL2":"ens6"}'
 
       # --------------------------------------------------------
       # Existing InfluxDB
