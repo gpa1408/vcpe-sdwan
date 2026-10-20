@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -51,6 +52,17 @@ def create_app(
     app = FastAPI(title="SD-WAN Forwarder API", version=service.version)
     app.state.root = root_path
     app.state.service = service
+
+    @app.on_event("startup")
+    def reconcile_runtime_services() -> None:
+        # state.json survives container/router restart; dnsmasq/pid/config do not.
+        # Repair only service runtime here.  Do not replay interfaces, WireGuard,
+        # routing or nftables. A later Agent transaction will retry as well because
+        # _render_services performs the same health check for unchanged DHCP state.
+        try:
+            service.reconcile_runtime_services()
+        except Exception:
+            logging.exception("Forwarder runtime service reconciliation failed at startup")
 
     @app.exception_handler(ForwarderError)
     async def handle_forwarder_error(_: Request, exc: ForwarderError) -> JSONResponse:

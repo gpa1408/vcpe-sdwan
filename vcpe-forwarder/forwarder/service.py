@@ -121,6 +121,21 @@ class ForwarderService:
             "version": self.version,
         }
 
+    def reconcile_runtime_services(self) -> dict[str, list[dict[str, Any]]]:
+        """Restore ephemeral services from persisted desired state without committing a revision."""
+        state = self.store.state_copy()
+        revision = f"runtime-{state.current_revision}"
+        try:
+            plan = self.renderer.render_runtime_services(state, revision)
+        except (ValueError, OSError) as exc:
+            raise ForwarderError(400, f"cannot render runtime services: {exc}") from exc
+
+        self.store.save_render_plan(plan)
+        journal = self.runner.run_plan(plan.phases)
+        self.store.save_render_plan(plan, journal)
+        self._raise_for_failures(revision, journal)
+        return journal
+
     def current_revision(self) -> RevisionInfo:
         return self.store.current_revision()
 
@@ -1022,6 +1037,7 @@ class ForwarderService:
             if method == "PUT":
                 server = DhcpServer.model_validate(payload or {})
                 state.dhcp_servers[server_id] = server
+
                 return OperationOutcome(200, "configured", server)
             if method == "DELETE":
                 self._require_mapping_item(state.dhcp_servers, server_id, "DHCP server")

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import re
 from pathlib import Path
 
@@ -87,6 +88,20 @@ class Renderer:
             "routing": self._render_routing(previous, current),
             "nftables": self._render_nftables(current, revision, plan),
             "services": self._render_services(previous, current, revision, plan),
+        }
+        return plan
+
+    def render_runtime_services(self, current: ForwarderState, revision: str) -> RenderPlan:
+        """Reconcile ephemeral service runtime without replaying the dataplane.
+
+        state.json is persistent, while dnsmasq processes, pid files and the active
+        /app/etc/forwarder/dnsmasq configs are runtime artifacts.  Re-render only
+        the services phase so a Forwarder/container restart can restore DHCP without
+        touching interfaces, WireGuard, routing or nftables.
+        """
+        plan = RenderPlan(revision=revision)
+        plan.phases = {
+            "services": self._render_services(current, current, revision, plan),
         }
         return plan
 
@@ -274,6 +289,55 @@ class Renderer:
                     commands.append(f"wg set {tunnel_id} peer {peer.public_key} remove || true")
         return commands
 
+    def _local_lan_route_commands(self, state: ForwarderState, route_table: int) -> list[str]:
+        """Install local LAN prefixes in a policy-routing table.
+
+        Conntrack restores the traffic-class/path fwmark on return packets.  Those
+        packets therefore consult the marked table too.  Without connected LAN
+        routes in that table, a return packet for a local client can match the
+        table's default route and be sent back into WireGuard/WAN instead of LAN.
+        """
+        lan_interfaces: set[str] = {
+            name for name, interface in state.interfaces.items() if interface.role == "lan"
+        }
+        lan_interfaces.update(state.bridges.keys())
+        lan_interfaces.update(
+            server.served_interface for server in state.dhcp_servers.values() if server.served_interface
+        )
+
+        wan_interfaces = set(state.wan_link_map.values())
+        commands: list[str] = []
+        seen: set[tuple[str, str]] = set()
+
+        for interface_name in sorted(lan_interfaces):
+            if interface_name in wan_interfaces or interface_name in state.tunnels:
+                continue
+
+            interface = state.interfaces.get(interface_name)
+            if interface is None or interface.admin_state == "down":
+                continue
+
+            for address in interface.addresses:
+                if ":" in address:
+                    continue
+                try:
+                    ip_interface = ipaddress.ip_interface(address)
+                except ValueError:
+                    continue
+
+                network = str(ip_interface.network)
+                identity = (network, interface_name)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+
+                commands.append(
+                    f"ip route replace {network} dev {interface_name} "
+                    f"src {ip_interface.ip} table {route_table}"
+                )
+
+        return commands
+
     def _render_routing(self, previous: ForwarderState, current: ForwarderState) -> list[str]:
         commands: list[str] = []
 
@@ -286,6 +350,7 @@ class Renderer:
                     f"ip rule add fwmark 0x{alloc.packet_mark:x}/0xffffffff lookup {alloc.route_table} priority {alloc.priority}",
                 ]
             )
+            commands.extend(self._local_lan_route_commands(current, alloc.route_table))
             commands.extend(self._route_for_path(path, current, alloc.route_table))
 
         for group_id, group in sorted(current.path_groups.items()):
@@ -297,6 +362,7 @@ class Renderer:
                     f"ip rule add fwmark 0x{alloc.packet_mark:x}/0xffffffff lookup {alloc.route_table} priority {alloc.priority}",
                 ]
             )
+            commands.extend(self._local_lan_route_commands(current, alloc.route_table))
             commands.extend(self._route_for_group(group_id, current, alloc.route_table))
 
         for traffic_class, decision in sorted(current.steering_active_paths.items()):
@@ -310,6 +376,7 @@ class Renderer:
             commands.append(f"ip route flush table {alloc.route_table} || true")
             commands.append(f"ip rule del fwmark 0x{alloc.packet_mark:x}/0xffffffff lookup {alloc.route_table} priority {alloc.priority} || true")
             commands.append(f"ip rule add fwmark 0x{alloc.packet_mark:x}/0xffffffff lookup {alloc.route_table} priority {alloc.priority}")
+            commands.extend(self._local_lan_route_commands(current, alloc.route_table))
 
             if decision.decision_status == "selected" and selected_path:
                 commands.extend(self._route_for_selected_path(selected_path, current, alloc.route_table, decision.selected_path_type))
@@ -326,6 +393,7 @@ class Renderer:
             commands.append(f"ip route flush table {alloc.route_table} || true")
             commands.append(f"ip rule del fwmark 0x{alloc.packet_mark:x}/0xffffffff lookup {alloc.route_table} priority {alloc.priority} || true")
             commands.append(f"ip rule add fwmark 0x{alloc.packet_mark:x}/0xffffffff lookup {alloc.route_table} priority {alloc.priority}")
+            commands.extend(self._local_lan_route_commands(current, alloc.route_table))
 
             if decision.decision_status == "selected" and decision.eligible_paths:
                 commands.extend(
@@ -516,6 +584,42 @@ class Renderer:
             f">/dev/null 2>&1 || true"
         )
 
+    def _dnsmasq_start_command(self, server_id: str, active_conf_path: str, pid_path: str) -> str:
+        return (
+            f"dnsmasq --conf-file={active_conf_path} --pid-file={pid_path}; "
+            f"for i in $(seq 1 30); do "
+            f"if [ -s {pid_path} ] && kill -0 $(cat {pid_path}) >/dev/null 2>&1; then "
+            f"exit 0; "
+            f"fi; "
+            f"sleep 0.1; "
+            f"done; "
+            f"echo 'dnsmasq failed to stay running for {server_id}' >&2; "
+            f"exit 1"
+        )
+
+    def _dnsmasq_runtime_reconcile_command(
+        self, server_id: str, rendered_conf_path: str, active_conf_path: str, pid_path: str
+    ) -> str:
+        """Repair dnsmasq only when the persisted desired service is not healthy."""
+        stop_command = self._dnsmasq_stop_command(server_id)
+        start_command = self._dnsmasq_start_command(server_id, active_conf_path, pid_path)
+        return (
+            f"HEALTHY=0; PID=''; "
+            f"if [ -s {pid_path} ]; then PID=$(cat {pid_path}); fi; "
+            f'if [ -n "$PID" ] && kill -0 "$PID" >/dev/null 2>&1 '
+            f"&& [ -r /proc/$PID/cmdline ] "
+            f"&& tr '\\000' ' ' < /proc/$PID/cmdline | grep -F -- '--conf-file={active_conf_path}' >/dev/null 2>&1 "
+            f"&& [ -f {active_conf_path} ] "
+            f"&& cmp -s {rendered_conf_path} {active_conf_path}; then HEALTHY=1; fi; "
+            f'if [ "$HEALTHY" -eq 0 ]; then '
+            f"mkdir -p /app/etc/forwarder/dnsmasq; "
+            f"install -m 0644 {rendered_conf_path} {active_conf_path}; "
+            f"dnsmasq --test --conf-file={active_conf_path} || exit $?; "
+            f"{stop_command}; "
+            f"{start_command}; "
+            f"fi"
+        )
+
     def _render_services(self, previous: ForwarderState, current: ForwarderState, revision: str, plan: RenderPlan) -> list[str]:
         commands: list[str] = []
 
@@ -532,7 +636,17 @@ class Renderer:
                 previous_server is not None
                 and previous_server.model_dump(mode="json") == server.model_dump(mode="json")
             ):
-                # Route/WireGuard/steering-only transactions must not bounce DHCP/DNS.
+                # Preserve the previous no-bounce behaviour, but verify ephemeral
+                # runtime.  If dnsmasq/config disappeared after a restart, restore
+                # them without touching a healthy service.
+                if server.enabled:
+                    commands.append(
+                        self._dnsmasq_runtime_reconcile_command(
+                            server_id, f"/app/{conf_path}", active_conf_path, pid_path
+                        )
+                    )
+                else:
+                    commands.append(self._dnsmasq_stop_command(server_id))
                 continue
 
             commands.append("mkdir -p /app/etc/forwarder/dnsmasq")
@@ -544,17 +658,7 @@ class Renderer:
             commands.append(self._dnsmasq_stop_command(server_id))
 
             if server.enabled:
-                commands.append(
-                    f"dnsmasq --conf-file={active_conf_path} --pid-file={pid_path}; "
-                    f"for i in $(seq 1 30); do "
-                    f"if [ -s {pid_path} ] && kill -0 $(cat {pid_path}) >/dev/null 2>&1; then "
-                    f"exit 0; "
-                    f"fi; "
-                    f"sleep 0.1; "
-                    f"done; "
-                    f"echo 'dnsmasq failed to stay running for {server_id}' >&2; "
-                    f"exit 1"
-                )
+                commands.append(self._dnsmasq_start_command(server_id, active_conf_path, pid_path))
 
         for ap_id, ap in sorted(current.access_points.items()):
             conf_path = f"var/lib/forwarder/rendered/{revision}/hostapd/{ap_id}.conf"
