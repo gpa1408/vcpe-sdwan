@@ -71,15 +71,16 @@ class MetricReader:
     
         fake_flow_metrics = {
             # ---------------------------------------------------------
-            # Flow 257 -> test-xr
+            # Flow 260 -> test-underlay-fo
             # ---------------------------------------------------------
-            ("257", "UPL1"): {
+            ("260", "UPL1"): {
                 "latency_ms": 20,
                 "jitter_ms": 3,
                 "loss_percent": 0.1,
                 "available_bandwidth_kbps": 50000
             },
-            ("257", "UPL2"): {
+        
+            ("260", "UPL2"): {
                 "latency_ms": 45,
                 "jitter_ms": 8,
                 "loss_percent": 0.5,
@@ -87,7 +88,7 @@ class MetricReader:
             },
         
             # ---------------------------------------------------------
-            # Flow 259 -> internet-web
+            # Flow 261 -> test-underlay-lb
             # ---------------------------------------------------------
             ("259", "UPL1"): {
                 "latency_ms": 18,
@@ -95,11 +96,18 @@ class MetricReader:
                 "loss_percent": 0.1,
                 "available_bandwidth_kbps": 60000
             },
-            ("259", "UPL2"): {
-                "latency_ms": 28,
+            ("261", "UPL1"): {
+                "latency_ms": 25,
                 "jitter_ms": 4,
                 "loss_percent": 0.2,
                 "available_bandwidth_kbps": 45000
+            },
+        
+            ("261", "UPL2"): {
+                "latency_ms": 30,
+                "jitter_ms": 5,
+                "loss_percent": 0.3,
+                "available_bandwidth_kbps": 40000
             }
         }
         
