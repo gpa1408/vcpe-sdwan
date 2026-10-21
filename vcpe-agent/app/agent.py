@@ -2911,8 +2911,8 @@ class Agent:
         }
     
         logging.info("Agent runtime steering cycle completed")
-        print("\n===== STEERING DECISIONS =====")
-        print(json.dumps(result, indent=2))
+        #print("\n===== STEERING DECISIONS =====")
+        #print(json.dumps(result, indent=2))
     
         return result
 
