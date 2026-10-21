@@ -73,6 +73,13 @@ class SecretResolver:
 
 
 class Renderer:
+    # Forwarder-owned return-path marks live in the high half of the 32-bit mark
+    # space so they cannot collide with the existing steering/path marks (0x1xx...).
+    # These marks are local dataplane state only; the Agent does not need to know them.
+    RETURN_MARK_FLAG = 0x80000000
+    RETURN_TABLE_BASE = 30000
+    RETURN_RULE_PRIORITY_BASE = 500
+
     def __init__(self, root: Path) -> None:
         self.root = root
         self.secrets = SecretResolver(root)
@@ -129,6 +136,47 @@ class Renderer:
                     priority=1000 + index,
                     label=alloc_label,
                 )
+
+        # Keep one internal return-path allocation per configured WireGuard tunnel.
+        # The remote CPE learns the ingress tunnel for each conntrack entry and uses
+        # this high-bit mark only in the reply direction.  This makes the return path
+        # symmetric without requiring any Agent/Controller coordination.
+        desired_return_keys = {f"return-tunnel:{tunnel_id}" for tunnel_id in state.tunnels}
+        for key in list(state.allocations):
+            if key.startswith("return-tunnel:") and key not in desired_return_keys:
+                state.allocations.pop(key, None)
+
+        used_return_indexes: set[int] = set()
+        for key, allocation in state.allocations.items():
+            if not key.startswith("return-tunnel:"):
+                continue
+            if allocation.packet_mark & self.RETURN_MARK_FLAG:
+                used_return_indexes.add(allocation.packet_mark & ~self.RETURN_MARK_FLAG)
+
+        next_return_index = max(used_return_indexes, default=0) + 1
+        for tunnel_id in sorted(state.tunnels):
+            key = f"return-tunnel:{tunnel_id}"
+            existing = state.allocations.get(key)
+            if existing is not None and (existing.packet_mark & self.RETURN_MARK_FLAG):
+                continue
+
+            # Replace any malformed/legacy allocation for the same internal key.
+            state.allocations.pop(key, None)
+            while next_return_index in used_return_indexes:
+                next_return_index += 1
+            if next_return_index >= self.RETURN_MARK_FLAG:
+                raise ValueError("return-path allocation space exhausted")
+
+            return_mark = self.RETURN_MARK_FLAG | next_return_index
+            state.allocations[key] = Allocation(
+                ct_mark=return_mark,
+                packet_mark=return_mark,
+                route_table=self.RETURN_TABLE_BASE + next_return_index,
+                priority=self.RETURN_RULE_PRIORITY_BASE + next_return_index,
+                label=key,
+            )
+            used_return_indexes.add(next_return_index)
+            next_return_index += 1
 
     def _render_cleanup(self, previous: ForwarderState, current: ForwarderState) -> list[str]:
         commands: list[str] = []
@@ -340,6 +388,22 @@ class Renderer:
 
     def _render_routing(self, previous: ForwarderState, current: ForwarderState) -> list[str]:
         commands: list[str] = []
+
+        # Stateful symmetric return path.  Each WireGuard tunnel gets a private
+        # fwmark/table pair.  nftables assigns this mark to the conntrack entry on
+        # the receiving CPE; only reply-direction packets restore it to meta mark.
+        for tunnel_id in sorted(current.tunnels):
+            alloc = current.allocations.get(f"return-tunnel:{tunnel_id}")
+            if alloc is None:
+                continue
+            commands.extend(
+                [
+                    f"ip route flush table {alloc.route_table} || true",
+                    f"ip rule del fwmark 0x{alloc.packet_mark:x}/0xffffffff lookup {alloc.route_table} priority {alloc.priority} || true",
+                    f"ip rule add fwmark 0x{alloc.packet_mark:x}/0xffffffff lookup {alloc.route_table} priority {alloc.priority}",
+                    f"ip route replace default dev {tunnel_id} table {alloc.route_table}",
+                ]
+            )
 
         for path_id, path in sorted(current.paths.items()):
             alloc = current.allocations[f"path:{path_id}"]
@@ -906,8 +970,31 @@ class Renderer:
             "table inet forwarder {",
             "  chain prerouting {",
             "    type filter hook prerouting priority mangle; policy accept;",
-            "    ct mark != 0 meta mark set ct mark",
         ]
+
+        # Learn the actual ingress WireGuard tunnel on the receiving CPE.  The rule
+        # runs for every original-direction packet, not only ct state new, so an
+        # established flow that fails over to another tunnel updates its return path.
+        for tunnel_id in sorted(current.tunnels):
+            alloc = current.allocations.get(f"return-tunnel:{tunnel_id}")
+            if alloc is None:
+                continue
+            escaped_tunnel = tunnel_id.replace("\\", "\\\\").replace('"', '\\"')
+            lines.append(
+                f'    iifname "{escaped_tunnel}" ct direction original '
+                f'ct mark set 0x{alloc.ct_mark:x}'
+            )
+
+        # Existing steering marks are restored only in the original direction.
+        # Learned return-path marks (high bit set) are restored only in reply
+        # direction.  This prevents the remote CPE from independently re-steering
+        # the reply through another ECMP tunnel.
+        lines.extend(
+            [
+                f"    ct direction original ct mark != 0 ct mark and 0x{self.RETURN_MARK_FLAG:x} == 0 meta mark set ct mark",
+                f"    ct direction reply ct mark and 0x{self.RETURN_MARK_FLAG:x} != 0 meta mark set ct mark",
+            ]
+        )
 
         for policy_id, policy in sorted(current.flow_policies.items(), key=lambda item: ((item[1].priority or 10**9), item[0])):
             rule = self._flow_policy_rule(policy_id, policy, current)
@@ -919,7 +1006,8 @@ class Renderer:
                 "  }",
                 "  chain output {",
                 "    type route hook output priority mangle; policy accept;",
-                "    ct mark != 0 meta mark set ct mark",
+                f"    ct direction original ct mark != 0 ct mark and 0x{self.RETURN_MARK_FLAG:x} == 0 meta mark set ct mark",
+                f"    ct direction reply ct mark and 0x{self.RETURN_MARK_FLAG:x} != 0 meta mark set ct mark",
                 "  }",
                 "  chain forward {",
                 "    type filter hook forward priority filter; policy accept;",
@@ -1002,7 +1090,14 @@ class Renderer:
         return tokens
 
     def _flow_policy_rule(self, policy_id: str, policy: FlowPolicy, current: ForwarderState) -> str:
-        tokens: list[str] = self._match_tokens(policy.match)
+        # Traffic-class steering applies only to the original direction and only to
+        # connections that are not carrying a learned return-path mark.  This keeps
+        # remote replies pinned to the tunnel learned from the real ingress path.
+        tokens: list[str] = [
+            "ct direction original",
+            f"ct mark and 0x{self.RETURN_MARK_FLAG:x} == 0",
+        ]
+        tokens.extend(self._match_tokens(policy.match))
 
         action = policy.action
         if action is None:
