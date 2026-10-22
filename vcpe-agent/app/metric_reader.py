@@ -117,7 +117,7 @@ class MetricReader:
             # Primary tunnel - best path
             # ---------------------------------------------------------
             "wg-upl2-upl2": {
-                "latency_ms": 50,
+                "latency_ms": 40,
                 "jitter_ms": 2,
                 "loss_percent": 0.1,
                 "available_bandwidth_kbps": 70000
@@ -137,10 +137,10 @@ class MetricReader:
             # Secondary tunnel 2
             # ---------------------------------------------------------
             "wg-upl2-upl1": {
-                "latency_ms": 45,
-                "jitter_ms": 7,
-                "loss_percent": 0.5,
-                "available_bandwidth_kbps": 35000
+                "latency_ms": 40,
+                "jitter_ms": 6,
+                "loss_percent": 0.4,
+                "available_bandwidth_kbps": 40000
             },
         
             # ---------------------------------------------------------
