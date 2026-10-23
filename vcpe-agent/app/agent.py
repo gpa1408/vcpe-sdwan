@@ -24,7 +24,7 @@ logging.basicConfig(level=logging.INFO)                                         
 class Agent:
     def __init__(self):
         self.config_reader = ConfigReader()
-        self.monitoring_manager = MonitoringManager(dry_run=True)    
+        self.monitoring_manager = MonitoringManager()    
         self.metric_reader = MetricReader()    
         
         self.current_config_cache = {}
