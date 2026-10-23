@@ -5,8 +5,7 @@ import requests
 
 class MonitoringManager:                                                               
     def __init__(self,dry_run=True):      
-        self.monitoring_base_url = "http://vcpe-monitoring:8090/api/v1"
-        self.dry_run = dry_run                                                          
+        self.monitoring_base_url = "http://host.docker.internal:9100/api/v1"                                                       
         
     def _as_list(self, value):                                                            # helper to normalize a value into a list
         if value is None:                                                              
@@ -96,13 +95,7 @@ class MonitoringManager:
             "interval_sec": self._calculate_interval_from_slo(slo)                        # selected probe frequency based on SLO strictness
         }
 
-        url = f"{self.monitoring_base_url}/monitoring/flows"                              # vcpe-monitoring endpoint for flow monitoring
-
-        if self.dry_run:                                                                 # dry_run if monitoring module is not available
-            print("\n===== DRY-RUN MONITORING FLOW START =====")                         
-            print("POST", url)                                                          
-            print(payload)                                                               # payload that would be sent
-            return payload                                                               
+        url = f"{self.monitoring_base_url}/monitoring/flows"                              # vcpe-monitoring endpoint for flow monitoring                                                         
 
         logging.info("Sending flow monitoring request: %s", payload)                     
 
@@ -112,12 +105,7 @@ class MonitoringManager:
         return payload                                                                        # return sent payload for agent logging/debugging
 
     def stop_underlay_flow_monitoring(self, flow_id, wan_link_name):        
-        url = f"{self.monitoring_base_url}/monitoring/flows/{flow_id}/{wan_link_name}"        # vcpe-monitoring endpoint for deleting flow monitor
-
-        if self.dry_run:                                                                      # dry_run if monitoring module is not available
-            print("\n===== DRY-RUN MONITORING FLOW STOP =====")                          
-            print("DELETE", url)                                                         
-            return     
+        url = f"{self.monitoring_base_url}/monitoring/flows/{flow_id}/{wan_link_name}"        # vcpe-monitoring endpoint for deleting flow monitor 
                     
         logging.info("Stopping flow monitoring for flow_id=%s wan_link=%s", flow_id, wan_link_name)
                 
@@ -142,13 +130,7 @@ class MonitoringManager:
             "interval_sec": 600                                                          # fixed interval for tunnel monitoring
         }
 
-        url = f"{self.monitoring_base_url}/monitoring/tunnels"                           # vcpe-monitoring endpoint for tunnel monitoring
-        
-        if self.dry_run:                                                                 # dry_run if monitoring module is not available
-            print("\n===== DRY-RUN MONITORING TUNNEL START =====")                         
-            print("POST", url)                                                          
-            print(payload)                                                               # payload that would be sent
-            return payload       
+        url = f"{self.monitoring_base_url}/monitoring/tunnels"                           # vcpe-monitoring endpoint for tunnel monitoring  
             
         logging.info("Sending tunnel monitoring request: %s", payload)                   
 
@@ -158,12 +140,7 @@ class MonitoringManager:
         return payload                                                                  
 
     def stop_overlay_tunnel_monitoring(self, tunnel_id):                                  
-        url = f"{self.monitoring_base_url}/monitoring/tunnels/{tunnel_id}"               # vcpe-monitoring endpoint for deleting tunnel monitor
-
-        if self.dry_run:                                                                 # dry_run if monitoring module is not available
-            print("\n===== DRY-RUN MONITORING TUNNEL STOP =====")                        
-            print("DELETE", url)                                                         
-            return     
+        url = f"{self.monitoring_base_url}/monitoring/tunnels/{tunnel_id}"               # vcpe-monitoring endpoint for deleting tunnel monitor  
                     
         logging.info("Stopping tunnel monitoring for tunnel_id=%s", tunnel_id)           
 
