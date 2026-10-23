@@ -474,21 +474,22 @@
 
         container five-tuple {
           description
-            "Five-tuple match criteria for packet classification";
+            "Five-tuple match criteria for packet classification (Multiple values within a field)";
 
-          leaf src-prefix {
+          leaf-list src-prefix {
             type inet:ip-prefix;
             description
-              "Source prefix to match";
+              "Source prefixes to match";
           }
 
-          leaf dst-prefix {
+          leaf-list dst-prefix {
             type inet:ip-prefix;
+            min-elements 1;
             description
-              "Destination prefix to match";
+              "Destination prefixes to match";
           }
 
-          leaf l4-protocol {
+          leaf-list l4-protocol {
             type enumeration {
               enum tcp;
               enum udp;
@@ -500,20 +501,16 @@
               "Layer 4 protocol to match";
           }
 
-          leaf src-port {
-            when "../l4-protocol = 'tcp' or ../l4-protocol = 'udp'";
+          leaf-list src-port {
             type port-number-or-any;
-            default "any";
             description
-              "Single source port match, or any";
+              "Source ports to match. If not configured, any source port is allowed";
           }
 
-          leaf dst-port {
-            when "../l4-protocol = 'tcp' or ../l4-protocol = 'udp'";
+          leaf-list dst-port {
             type port-number-or-any;
-            default "any";
             description
-              "Single destination port match, or any";
+              "Destination ports to match. If not configured, any destination port is allowed";
           }
         }
       }
