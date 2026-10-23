@@ -4,7 +4,7 @@ import logging
 import requests                                                                        
 
 class MonitoringManager:                                                               
-    def __init__(self,dry_run=True):      
+    def __init__(self):      
         self.monitoring_base_url = "http://host.docker.internal:9100/api/v1"                                                       
         
     def _as_list(self, value):                                                            # helper to normalize a value into a list
