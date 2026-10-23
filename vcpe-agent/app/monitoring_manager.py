@@ -20,47 +20,41 @@ class MonitoringManager:
             return None                                                                  
         return str(prefix).split("/", 1)[0]                                                # convert 192.168.10.2/24 into 192.168.10.2
 
-    def _calculate_interval_from_slo(self, slo):                                        
-        if not isinstance(slo, dict):                                                      # if SLO object is missing or invalid use default interval for best-effort traffic
-            return 600                                                         
-
-        max_latency = float(slo["max-latency-ms"]) if slo.get("max-latency-ms") is not None else None
-        max_jitter = float(slo["max-jitter-ms"]) if slo.get("max-jitter-ms") is not None else None
-        max_loss = float(slo["max-loss-percent"]) if slo.get("max-loss-percent") is not None else None
-        min_bandwidth = float(slo["min-bandwidth-kbps"]) if slo.get("min-bandwidth-kbps") is not None else None                                     
-
-        candidate_intervals = []                                                          # stores suggested intervals from each configured SLO metric
-
-        if max_latency is not None:                                                      
-            if max_latency <= 30:                                                       
-                candidate_intervals.append(2)                                             # strict latency requirement suggest 2 seconds
-            elif max_latency <= 100:                                                     
-                candidate_intervals.append(5)                                             # moderate latency requirement suggest 5 seconds
-            else:                                                                         
-                candidate_intervals.append(10)                                            # relaxed latency requirement suggest 10 seconds
-
-        if max_jitter is not None:                                                   
-            if max_jitter <= 10:                                                         
-                candidate_intervals.append(2)                                          
-            elif max_jitter <= 30:                                                       
-                candidate_intervals.append(5)                                           
-            else:                                                                      
-                candidate_intervals.append(10)                                           
-
-        if max_loss is not None:                                                       
-            if max_loss <= 1:                                                            
-                candidate_intervals.append(5)                                           
-            else:                                                                        
-                candidate_intervals.append(10)                                         
-
-        if min_bandwidth is not None:                                                 
-            candidate_intervals.append(10)                                               
-
-        if not candidate_intervals:                                                    
-            return 600                                                                    # if no SLO metric is configured, use default best-effort interval
-
-        return min(candidate_intervals)                                                   # choose the smallest interval as common interval
-
+    def _calculate_interval_from_slo(self, slo):
+        if not isinstance(slo, dict) or not slo:
+            return 600                                                                      # best-effort traffic: probe every 10 minutes
+    
+        candidate_intervals = []
+    
+        # Latency
+        if slo.get("max-latency-ms") is not None:
+            candidate_intervals.append(5)                                                    # latency -> every 5 seconds
+    
+        # Jitter
+        if slo.get("max-jitter-ms") is not None:
+            candidate_intervals.append(2)                                                     # jitter -> every 2 seconds 
+    
+        # Packet loss
+        if slo.get("max-loss-percent") is not None:
+            loss = float(slo["max-loss-percent"])
+    
+            if loss == 0:
+                interval_sec = 200                                                            # practical maximum sample for zero-loss requirement
+            else:
+                packet_count = max(1, round(100 / loss))                                      # Ex: 0.5% -> 200 packets, 1% -> 100 packets
+                probe_rate_pps = 10                                                           # assumes the monitoring module can send 10 probe packets per second.
+                interval_sec = max(1, round(packet_count / probe_rate_pps))
+    
+            candidate_intervals.append(interval_sec)
+    
+        if slo.get("min-bandwidth-kbps") is not None:                                     # Bandwidth
+            candidate_intervals.append(60)
+    
+        if not candidate_intervals:                                                        # No SLO configured
+            return 600
+    
+        return min(candidate_intervals)                                                    # Use the most frequent interval required
+    
     def _select_probe_tools(self, slo):                                                   
         if not isinstance(slo, dict):                                                      # if no SLO is provided use ping as default reachability/RTT probe
             return ["ping"]                                                                
