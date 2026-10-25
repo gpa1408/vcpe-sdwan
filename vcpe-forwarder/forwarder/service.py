@@ -1027,7 +1027,9 @@ class ForwarderService:
                 state.nat_policies[nat_policy_id] = nat_policy
                 return OperationOutcome(200, "configured", nat_policy)
             if method == "DELETE":
-                self._require_mapping_item(state.nat_policies, nat_policy_id, "NAT policy")
+                # Keep DELETE idempotent.  Agent/YANG reconciliation may remove an
+                # Internet-egress NAT policy when a WAN is disabled, deleted, or
+                # changes to a role such as ipvpn where masquerade is not required.
                 state.nat_policies.pop(nat_policy_id, None)
                 return OperationOutcome(204, "deleted")
 

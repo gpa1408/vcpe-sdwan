@@ -921,6 +921,20 @@ class Renderer:
         if not devices:
             return [self._unreachable_default_command(route_table)]
 
+        commands: list[str] = []
+
+        # Linux defaults to Layer-3 ECMP hashing (fib_multipath_hash_policy=0).
+        # With SD-WAN traffic tests the source/destination IP pair can stay the same
+        # while only TCP/UDP ports change, so several independent flows may hash to
+        # the same next-hop.  Policy 1 makes IPv4 ECMP Layer-4 aware.
+        #
+        # BusyBox provides the sysctl applet in the Forwarder image, so no procps
+        # dependency is required.  Apply this only when real multipath ECMP exists.
+        if len(devices) > 1:
+            commands.append(
+                "sysctl -w net.ipv4.fib_multipath_hash_policy=1 >/dev/null"
+            )
+
         # Build a gateway-aware multipath route at apply time.
         # IMPORTANT: the routing table belongs to the route itself and must be
         # placed before the multipath nexthop blocks.
@@ -935,7 +949,8 @@ class Renderer:
                 f"else ROUTE=\"$ROUTE nexthop dev {dev} weight 1\"; fi"
             )
         parts.append('eval "$ROUTE"')
-        return ["; ".join(parts)]
+        commands.append("; ".join(parts))
+        return commands
 
     def _can_route_direct(self, selected_path: str | None, state: ForwarderState) -> bool:
         if not selected_path:
@@ -1032,7 +1047,7 @@ class Renderer:
                 continue
             alloc = current.allocations.get(f"path:{path_id}")
             policy = current.nat_policies.get(path.nat_policy_id)
-            if alloc and policy:
+            if alloc and policy and policy.scope == "path":
                 for rule in self._nat_rules_for_policy(policy, alloc.ct_mark, "prerouting"):
                     lines.append(f"    {rule}")
 
@@ -1049,9 +1064,21 @@ class Renderer:
                 continue
             alloc = current.allocations.get(f"path:{path_id}")
             policy = current.nat_policies.get(path.nat_policy_id)
-            if alloc and policy:
+            if alloc and policy and policy.scope == "path":
                 for rule in self._nat_rules_for_policy(policy, alloc.ct_mark, "postrouting"):
                     lines.append(f"    {rule}")
+
+        # WAN egress NAT is intentionally independent from traffic-class fwmarks.
+        # This covers both:
+        #   1) marked traffic-class traffic using policy-routing tables, and
+        #   2) unmarked best-effort traffic using the main routing table.
+        # The Agent decides which WAN roles require Internet NAT and sends these
+        # policies with scope="egress" and an out_interface (for example ens5).
+        for _policy_id, policy in sorted(current.nat_policies.items()):
+            if policy.scope != "egress":
+                continue
+            for rule in self._nat_rules_for_policy(policy, None, "postrouting"):
+                lines.append(f"    {rule}")
 
         lines.extend(["  }", "}"])
         return "\n".join(lines) + "\n"
@@ -1154,7 +1181,7 @@ class Renderer:
 
         return " ".join(tokens)
 
-    def _nat_rules_for_policy(self, policy: NatPolicy, ct_mark: int, phase: str) -> list[str]:
+    def _nat_rules_for_policy(self, policy: NatPolicy, ct_mark: int | None, phase: str) -> list[str]:
         rules: list[str] = []
         for rule in policy.rules:
             if phase == "prerouting" and rule.action not in {"dnat", "port_forward"}:
@@ -1162,7 +1189,9 @@ class Renderer:
             if phase == "postrouting" and rule.action not in {"masquerade", "snat"}:
                 continue
 
-            tokens = [f"ct mark 0x{ct_mark:x}"]
+            tokens: list[str] = []
+            if ct_mark is not None:
+                tokens.append(f"ct mark 0x{ct_mark:x}")
             if rule.out_interface:
                 tokens.append(f'oifname "{rule.out_interface}"')
             if rule.src_prefix:

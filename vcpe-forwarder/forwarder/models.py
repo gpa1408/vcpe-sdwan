@@ -227,6 +227,10 @@ class NatRule(ForwarderModel):
 
 
 class NatPolicy(ForwarderModel):
+    # Existing NAT policies are path-scoped by default and remain backward compatible.
+    # Egress-scoped policies are rendered by WAN output interface without requiring
+    # a conntrack/fwmark, so they also cover unmarked best-effort Internet traffic.
+    scope: Literal["path", "egress"] = "path"
     rules: list[NatRule]
 
 
