@@ -932,7 +932,12 @@ class Renderer:
         # dependency is required.  Apply this only when real multipath ECMP exists.
         if len(devices) > 1:
             commands.append(
-                "sysctl -w net.ipv4.fib_multipath_hash_policy=1 >/dev/null"
+                "CURRENT=$(cat /proc/sys/net/ipv4/fib_multipath_hash_policy 2>/dev/null || echo unknown); "
+                "if [ \"$CURRENT\" = \"1\" ]; then "
+                "echo 'fib_multipath_hash_policy already set to 1'; "
+                "else "
+                "sysctl -w net.ipv4.fib_multipath_hash_policy=1 >/dev/null; "
+                "fi"
             )
 
         # Build a gateway-aware multipath route at apply time.
