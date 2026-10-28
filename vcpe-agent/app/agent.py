@@ -49,6 +49,10 @@ class Agent:
         self.forwarder_base_url = "http://host.docker.internal:9090"                  # fixed forwarder API URL used by the agent
         self.forwarder_dry_run = False                                                # If forwarder is not ready yet,a dry-run "true" (false send real API calls)
 
+        self.applied_steering_decisions = {}                                          # traffic-class & currently applied decision key info
+        self.pending_steering_decisions = {}                                          # traffic-class & candidate decision waiting for confirmation
+        self.steering_confirm_cycles = 5                                              # wait and check whether decision is same for 05 consecutive cycles
+
         self.startup_reconciled = False
         self.startup_reconcile_started = False
         self.startup_reconcile_lock = threading.Lock()
@@ -2736,6 +2740,75 @@ class Agent:
 
         return decisions                                                                     #returns all steering decisions.
 
+    def _stabilize_steering_decisions(self, steering_decisions):
+        stable_decisions = []
+    
+        for decision in steering_decisions:
+            traffic_class = decision.get("traffic-class")
+            action = decision.get("action") 
+            if not traffic_class:
+                continue
+    
+            # ---------------------------------------------------------
+            # Create a comparable representation of the steering result
+            # ---------------------------------------------------------
+            if action == "set-active-path":
+                decision_key = (action, decision.get("selected-path-type"), decision.get("selected-path"))
+            elif action == "set-load-balance-policy":
+                decision_key = (action, decision.get("selected-path-type"), tuple(sorted(decision.get("eligible-paths", []))))
+            else:
+                continue
+    
+            current_key = self.applied_steering_decisions.get(traffic_class)
+    
+            # ---------------------------------------------------------
+            # First decision for this traffic class --> apply immediately
+            # ---------------------------------------------------------
+            if current_key is None:
+                self.applied_steering_decisions[traffic_class] = decision_key
+                self.pending_steering_decisions.pop(traffic_class, None)
+    
+                stable_decisions.append(decision)
+    
+                logging.info("Initial steering decision applied: class=%s decision=%s", traffic_class, decision_key)
+
+                continue
+    
+            # ---------------------------------------------------------
+            # Decision has not changed -> nothing to send to Forwarder
+            # ---------------------------------------------------------
+            if decision_key == current_key:
+                self.pending_steering_decisions.pop(traffic_class, None)
+                continue
+    
+            # ---------------------------------------------------------
+            # New candidate decision -> start or increment confirmation
+            # ---------------------------------------------------------
+            pending = self.pending_steering_decisions.get(traffic_class)
+    
+            if pending and pending.get("decision-key") == decision_key:
+                pending["count"] += 1
+            else:
+                pending = {"decision-key": decision_key, "count": 1}
+    
+                self.pending_steering_decisions[traffic_class] = pending
+    
+            logging.info("Steering change pending: class=%s current=%s candidate=%s confirmation=%s/%s", traffic_class,  current_key, decision_key, pending["count"], self.steering_confirm_cycles )
+    
+            # ---------------------------------------------------------
+            # Apply only after same decision persists for N cycles
+            # ---------------------------------------------------------
+            if pending["count"] >= self.steering_confirm_cycles:
+    
+                self.applied_steering_decisions[traffic_class] = decision_key
+                self.pending_steering_decisions.pop(traffic_class, None)
+    
+                stable_decisions.append(decision)
+    
+                logging.info("Steering change confirmed: class=%s new-decision=%s", traffic_class, decision_key)
+    
+        return stable_decisions
+
     def _build_steering_operations(self, steering_decisions):
         operations = []
 
@@ -2887,16 +2960,14 @@ class Agent:
                         metric
                     )                                                                       # store tunnel state by tunnel name
     
-        steering_decisions = self._make_steering_decisions(
-            current_config,
-            flow_state_map,
-            tunnel_state_map
-        )                                                                                   # make steering decisions using flow and tunnel states
+        steering_decisions = self._make_steering_decisions(current_config, flow_state_map, tunnel_state_map )       # make steering decisions using flow and tunnel states
+
+        stable_steering_decisions = self._stabilize_steering_decisions(steering_decisions)
 
         self.latest_flow_state_map = flow_state_map                                         # replace previous current flow metric snapshot & expose latest underlay flow metrics through YANG state
         self.latest_tunnel_state_map = tunnel_state_map                                     # replace previous current tunnel metric snapshot & expose latest underlay flow metrics through YANG state
     
-        steering_operations = self._build_steering_operations(steering_decisions)            # convert decisions to forwarder operations
+        steering_operations = self._build_steering_operations(stable_steering_decisions)            # convert decisions to forwarder operations
     
         if steering_operations:
             self._send_forwarder_transaction(
