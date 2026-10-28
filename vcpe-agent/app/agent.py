@@ -2779,7 +2779,7 @@ class Agent:
             # ---------------------------------------------------------
             if decision_key == current_key:
                 self.pending_steering_decisions.pop(traffic_class, None)
-                    logging.info("Steering unchanged: class=%s decision=%s", traffic_class, decision_key)
+                logging.info("Steering unchanged: class=%s decision=%s", traffic_class, decision_key)
                 continue
     
             # ---------------------------------------------------------
