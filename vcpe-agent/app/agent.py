@@ -51,7 +51,7 @@ class Agent:
 
         self.applied_steering_decisions = {}                                          # traffic-class & currently applied decision key info
         self.pending_steering_decisions = {}                                          # traffic-class & candidate decision waiting for confirmation
-        self.steering_confirm_cycles = 5                                              # wait and check whether decision is same for 05 consecutive cycles
+        self.steering_confirm_cycles = 3                                              # wait and check whether decision is same for 03 consecutive cycles
 
         self.startup_reconciled = False
         self.startup_reconcile_started = False
@@ -2779,6 +2779,7 @@ class Agent:
             # ---------------------------------------------------------
             if decision_key == current_key:
                 self.pending_steering_decisions.pop(traffic_class, None)
+                    logging.info("Steering unchanged: class=%s decision=%s", traffic_class, decision_key)
                 continue
     
             # ---------------------------------------------------------
