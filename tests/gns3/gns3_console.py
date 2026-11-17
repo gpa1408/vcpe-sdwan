@@ -3,6 +3,7 @@
 
 Requires Python 3.12 and requests. Default mode is read-only.
 Only --recover-both can change a CPE's namespace configuration.
+--test-cross is read-only and checks both namespaces and their routed connectivity.
 """
 
 import argparse
@@ -165,7 +166,7 @@ def local_script_sha256():
     if not SCRIPT_FILE.is_file():
         raise RuntimeError(f"Local script not found: {SCRIPT_FILE}")
     script = SCRIPT_FILE.read_bytes().replace(b"\r\n", b"\n")
-    if not script.lstrip(bytes([10,13])).startswith(b"#!/bin/sh\n"):
+    if not script.lstrip(bytes([10, 13])).startswith(b"#!/bin/sh\n"):
         raise RuntimeError("Local script has an unexpected header")
     return hashlib.sha256(script).hexdigest()
 
@@ -192,6 +193,111 @@ def recover_namespace(session, name, digest):
     namespace_test(session, name)
 
 
+
+def read_namespace_ip(session, name):
+    """Find a valid DHCP IPv4 address without assuming a fixed lease."""
+    cfg = DEVICES[name]
+    result = run_command(
+        session,
+        f"ip netns exec {cfg['ns']} ip -4 -o addr show dev {cfg['iface']}",
+    )
+    expected_network = ipaddress.ip_network(cfg["net"])
+    for candidate in re.findall(r"\binet\s+(\d+\.\d+\.\d+\.\d+/\d+)\b", result):
+        address = ipaddress.ip_interface(candidate)
+        if address.network == expected_network:
+            return str(address.ip)
+    raise RuntimeError(f"No valid IPv4 address for {cfg['ns']}: {result}")
+
+
+def verify_cross_route(session, name, peer):
+    """Verify that the inter-CPE underlay and return route are configured."""
+    local_underlay = "10.200.0.1/30" if name == "CPE-1" else "10.200.0.2/30"
+    peer_underlay = "10.200.0.2" if name == "CPE-1" else "10.200.0.1"
+    underlay = run_command(session, "ip -4 -o addr show dev eth1")
+    if not re.search(r"\binet\s+" + re.escape(local_underlay) + r"\b", underlay):
+        raise RuntimeError(f"Expected eth1 address {local_underlay} is missing: {underlay}")
+    print(f"PASS: eth1 underlay address {local_underlay}")
+
+    forward = run_command(session, "sysctl -n net.ipv4.ip_forward")
+    if forward.strip() != "1":
+        raise RuntimeError("IPv4 forwarding is disabled")
+    print("PASS: IPv4 forwarding is enabled")
+
+    peer_network = DEVICES[peer]["net"]
+    route = run_command(session, f"ip -4 route show {peer_network}")
+    pattern = (
+        r"^" + re.escape(peer_network)
+        + r"\s+via\s+" + re.escape(peer_underlay)
+        + r"\s+dev\s+eth1(?:\s|$)"
+    )
+    if not re.search(pattern, route, re.MULTILINE):
+        raise RuntimeError(
+            f"Expected route to {peer_network} via {peer_underlay} dev eth1 is missing: {route}"
+        )
+    print(f"PASS: Route to {peer_network} via {peer_underlay}")
+
+
+def check_cross_ping(session, source, destination_ip):
+    source_ns = DEVICES[source]["ns"]
+    print(f"Testing {source_ns} -> {destination_ip}")
+    ping = run_command(
+        session,
+        f"ip netns exec {source_ns} ping -c 3 -W 2 {destination_ip}",
+        timeout=20,
+    )
+    stats = re.search(
+        r"(\d+)\s+packets?\s+transmitted,\s*(\d+)\s+(?:packets?\s+)?received,\s*(\d+)%\s+packet loss",
+        ping,
+    )
+    if not stats or tuple(map(int, stats.groups())) != (3, 3, 0):
+        raise RuntimeError(f"Cross-namespace ping did not pass:\n{ping}")
+    print(f"PASS: {source_ns} -> {destination_ip}, 3/3 replies, 0% loss")
+
+
+def test_cross():
+    """Read-only: verify both CPEs first, then ping both remote namespaces."""
+    addresses = {}
+    failures = []
+    names = list(DEVICES)
+
+    for name in names:
+        peer = next(n for n in names if n != name)
+        print(f"\n=== {name} / underlay and namespace checks ===", flush=True)
+        try:
+            host, port = discover(name)
+            print(f"Console: {host}:{port}")
+            with connect_console(host, port) as session:
+                namespace_test(session, name)
+                addresses[name] = read_namespace_ip(session, name)
+                print(f"PASS: Discovered current {DEVICES[name]['ns']} IP {addresses[name]}")
+                verify_cross_route(session, name, peer)
+        except (RuntimeError, OSError, requests.RequestException) as exc:
+            print(f"FAIL: {exc}")
+            failures.append(name)
+
+    if failures:
+        print("\nSKIP: Cross-namespace pings because prerequisite checks failed")
+        print(f"CI RESULT: FAIL ({', '.join(failures)})")
+        return 1
+
+    for name in names:
+        peer = next(n for n in names if n != name)
+        print(f"\n=== {name} -> {peer} namespace ping ===", flush=True)
+        try:
+            host, port = discover(name)
+            with connect_console(host, port) as session:
+                check_cross_ping(session, name, addresses[peer])
+        except (RuntimeError, OSError, requests.RequestException) as exc:
+            print(f"FAIL: {exc}")
+            failures.append(name)
+
+    if failures:
+        print(f"\nCI RESULT: FAIL ({', '.join(failures)})")
+        return 1
+    print("\nCI RESULT: PASS (bidirectional routed namespace connectivity)")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description="SD-WAN GNS3 console CI checks")
     parser.add_argument("--device", choices=tuple(DEVICES), default="CPE-1")
@@ -199,9 +305,13 @@ def main():
     group.add_argument("--probe", action="store_true", help="Read-only Linux probe")
     group.add_argument("--test", action="store_true", help="Read-only namespace test on one CPE")
     group.add_argument("--test-both", action="store_true", help="Read-only tests on both CPEs")
+    group.add_argument("--test-cross", action="store_true",
+                       help="Read-only end-to-end namespace pings in both directions")
     group.add_argument("--recover-both", action="store_true",
                        help="CHANGES CPEs: download, verify and run namespace setup script on both")
     args = parser.parse_args()
+    if args.test_cross:
+        return test_cross()
     names = list(DEVICES) if args.test_both or args.recover_both else [args.device]
     digest = local_script_sha256() if args.recover_both else None
     failures = []
