@@ -1,0 +1,9 @@
+baseline-topology.json
+.env
+*.pem
+*.key
+*.qcow2
+*.log
+__pycache__/
+*.pyc
+test-results/
